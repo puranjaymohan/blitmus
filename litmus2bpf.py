@@ -137,11 +137,26 @@ class BPFGenerator:
     def __init__(self, parser: LitmusParser):
         self.parser = parser
         self.max_processes = 8  # Maximum number of processes supported
+        self.reg_mapping = {}  # Will be populated during BPF generation
+        
+    def _create_register_mapping(self):
+        """Create a mapping from (proc_id, reg) to sequential register numbers"""
+        reg_counter = 1
+        reg_mapping = {}
+        for proc in self.parser.processes:
+            proc_id = proc['id']
+            for reg in proc.get('registers', []):
+                reg_mapping[(proc_id, reg)] = reg_counter
+                reg_counter += 1
+        return reg_mapping
         
     def generate_bpf_c(self) -> str:
         """Generate BPF C code"""
         if len(self.parser.processes) > self.max_processes:
             print(f"Warning: Only supporting up to {self.max_processes} processes, but test has {len(self.parser.processes)}")
+        
+        # Create register mapping first
+        self.reg_mapping = self._create_register_mapping()
         
         code = []
         code.append("// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause")
@@ -167,13 +182,21 @@ class BPFGenerator:
         for var in sorted(self.parser.variables):
             code.append(f"    volatile int {var}[1000];")
         
-        # Add registers for each process
-        for proc_id, regs in self.parser.registers.items():
-            for reg in regs:
-                code.append(f"    volatile int P{proc_id}_{reg}[1000];")
+        # Add registers for each process - use sequential numbering
+        reg_counter = 1
+        reg_mapping = {}  # Map (proc_id, reg) to sequential number
+        for proc in self.parser.processes:
+            proc_id = proc['id']
+            for reg in proc.get('registers', []):
+                reg_mapping[(proc_id, reg)] = reg_counter
+                code.append(f"    volatile int r{reg_counter}[1000];  // For P{proc_id}_{reg}")
+                reg_counter += 1
         
         code.append("} shared;")
         code.append("")
+        
+        # Store the mapping for later use
+        self.reg_mapping = reg_mapping
         
         # Add synchronization flag
         code.append("volatile __u64 flag[1000] = {0};")
@@ -248,10 +271,13 @@ class BPFGenerator:
         if read_match:
             reg = read_match.group(1)
             var = read_match.group(2)
-            return f"shared.P{proc_id}_{reg}[i] = shared.{var}[i];"
+            # Use the sequential register mapping
+            reg_num = self.reg_mapping.get((proc_id, reg), 0)
+            return f"shared.r{reg_num}[i] = shared.{var}[i];"
         
         # Default case - pass through (with a warning comment)
         return f"/* Unsupported operation: {op} */";
+    
     def generate_user_c(self) -> str:
         """Generate user-space C code"""
         num_processes = len(self.parser.processes)
@@ -265,7 +291,9 @@ class BPFGenerator:
         code.append("#include <unistd.h>")
         code.append("#include <sys/resource.h>")
         code.append("#include <bpf/libbpf.h>")
-        code.append("#include \"test.skel.h\"")
+        # Determine the skeleton header name
+        test_name = self.parser.test_name.lower().replace('+', '_')
+        code.append(f"#include \"{test_name}.skel.h\"")
         code.append("#include <stdlib.h>")
         code.append("#include <errno.h>")
         code.append("#include <unistd.h>")
@@ -280,6 +308,7 @@ class BPFGenerator:
         code.append("#include <string.h>")
         code.append("#include <stdbool.h>")
         code.append("#include <sys/sysinfo.h>")
+        code.append("#include <stdarg.h>")
         code.append("")
         
         # Add libbpf print function
@@ -302,10 +331,11 @@ class BPFGenerator:
         code.append("")
         
         # Add worker arguments struct
+        test_name = self.parser.test_name.lower().replace('+', '_')
         code.append("struct worker_args {")
         code.append("    int cpu;")
         code.append("    int prog_fd;")
-        code.append("    struct test_bpf *skel;")
+        code.append(f"    struct {test_name}_bpf *skel;")
         code.append("    pthread_barrier_t *barrier;  // Add barrier for synchronization")
         code.append("};")
         code.append("")
@@ -439,17 +469,20 @@ class BPFGenerator:
         code.append("")
         
         # Add reset state function
-        code.append("void reset_state(struct test_bpf *skel) {")
+        test_name = self.parser.test_name.lower().replace('+', '_')
+        code.append(f"void reset_state(struct {test_name}_bpf *skel) {{")
         code.append("\tmemset(skel->bss, 0, sizeof(*skel->bss));")
         
         # Initialize all variables to 0
         for var in sorted(self.parser.variables):
             code.append(f"\tmemset(skel->bss->shared.{var}, 0, sizeof(int) * 1000);")
         
-        # Initialize all registers to 0
-        for proc_id, regs in self.parser.registers.items():
-            for reg in regs:
-                code.append(f"\tmemset(skel->bss->shared.P{proc_id}_{reg}, 0, sizeof(int) * 1000);")
+        # Initialize all registers to 0 using sequential numbering
+        reg_counter = 1
+        for proc in self.parser.processes:
+            for reg in proc.get('registers', []):
+                code.append(f"\tmemset(skel->bss->shared.r{reg_counter}, 0, sizeof(int) * 1000);")
+                reg_counter += 1
         
         code.append("}")
         code.append("")
@@ -471,9 +504,10 @@ class BPFGenerator:
         code.append("")
         
         # Add main function
+        test_name = self.parser.test_name.lower().replace('+', '_')
         code.append("int main(int argc, char **argv)")
         code.append("{")
-        code.append("\tstruct test_bpf *skel;")
+        code.append(f"\tstruct {test_name}_bpf *skel;")
         code.append("\tint err;")
         code.append("\tstruct test_config config = {")
         code.append("\t\t.iterations = 1000000,")
@@ -488,8 +522,11 @@ class BPFGenerator:
         
         # Add result counters based on the exists clause
         if self.parser.conditions:
-            # Create a counter for each possible outcome
-            code.append("\t// Result counters")
+            # Calculate the number of states (2^number_of_registers)
+            num_registers = sum(len(proc.get('registers', [])) for proc in self.parser.processes)
+            num_states = 2 ** num_registers
+            code.append(f"\t// Add counters for all possible states ({num_states} states for {num_registers} binary variables)")
+            code.append(f"\tunsigned long states[{num_states}] = {{0}};")
             code.append("\tint matches = 0, non_matches = 0;")
         
         # Add thread variables
@@ -518,9 +555,9 @@ class BPFGenerator:
         code.append("\tstatic struct option long_options[] = {")
         code.append("\t\t{\"iterations\", required_argument, 0, 'i'},")
         
-        # Add CPU options
+        # Add CPU options with numeric characters
         for i in range(num_processes):
-            code.append(f"\t\t{{\"cpu{i+1}\", required_argument, 0, 'c{i+1}'}},")
+            code.append(f"\t\t{{\"cpu{i+1}\", required_argument, 0, '{i+1}'}},")
         
         code.append("\t\t{\"delay\", required_argument, 0, 'd'},")
         code.append("\t\t{\"random-cpus\", no_argument, 0, 'r'},")
@@ -533,11 +570,11 @@ class BPFGenerator:
         # Add option parsing loop
         code.append("\tint opt;")
         code.append("\tint option_index = 0;")
-        code.append("\tchar optstring[50] = \"i:rvh\";")
+        code.append("\tchar optstring[50] = \"i:rvhd:\";")
         
         # Add CPU options to optstring
         for i in range(num_processes):
-            code.append(f"\tstrcat(optstring, \"c{i+1}:\");")
+            code.append(f"\tstrcat(optstring, \"{i+1}:\");")
         
         code.append("")
         code.append("\twhile ((opt = getopt_long(argc, argv, optstring, long_options, &option_index)) != -1) {")
@@ -548,10 +585,13 @@ class BPFGenerator:
         
         # Add CPU option cases
         for i in range(num_processes):
-            code.append(f"\t\tcase 'c{i+1}':")
+            code.append(f"\t\tcase '{i+1}':")
             code.append(f"\t\t\tconfig.cpu{i+1} = atoi(optarg);")
             code.append("\t\t\tbreak;")
         
+        code.append("\t\tcase 'd':")
+        code.append("\t\t\t// Delay option (not implemented in this version)")
+        code.append("\t\t\tbreak;")
         code.append("\t\tcase 'r':")
         code.append("\t\t\tconfig.random_cpus = true;")
         code.append("\t\t\tbreak;")
@@ -569,18 +609,19 @@ class BPFGenerator:
         code.append("")
         
         # Add libbpf setup
+        test_name = self.parser.test_name.lower().replace('+', '_')
         code.append("\t/* Set up libbpf errors and debug info callback */")
         code.append("\tlibbpf_set_print(libbpf_print_fn);")
         code.append("")
         code.append("\t/* Open BPF application */")
-        code.append("\tskel = test_bpf__open();")
+        code.append(f"\tskel = {test_name}_bpf__open();")
         code.append("\tif (!skel) {")
         code.append("\t\tfprintf(stderr, \"Failed to open BPF skeleton\\n\");")
         code.append("\t\treturn 1;")
         code.append("\t}")
         code.append("")
         code.append("\t/* Load & verify BPF programs */")
-        code.append("\terr = test_bpf__load(skel);")
+        code.append(f"\terr = {test_name}_bpf__load(skel);")
         code.append("\tif (err) {")
         code.append("\t\tfprintf(stderr, \"Failed to load and verify BPF skeleton\\n\");")
         code.append("\t\tgoto cleanup;")
@@ -679,14 +720,49 @@ class BPFGenerator:
         
         # Generate result checking code based on exists clause
         if self.parser.conditions:
-            # Check if the conditions match
-            code.append("\t\t\tbool match = true;")
-            for proc_id, reg, value in self.parser.conditions:
-                code.append(f"\t\t\tif (skel->bss->shared.P{proc_id}_{reg}[ii] != {value}) {{")
-                code.append("\t\t\t\tmatch = false;")
-                code.append("\t\t\t\tbreak;")
-                code.append("\t\t\t}")
-            code.append("\t\t\tif (match) {")
+            # Generate code to get register values
+            code.append("\t\t\t// Get the values for this iteration")
+            reg_counter = 1
+            reg_vars = []
+            for proc in self.parser.processes:
+                proc_id = proc['id']
+                for reg in proc.get('registers', []):
+                    var_name = f"p{proc_id}_{reg}"
+                    code.append(f"\t\t\tint {var_name} = skel->bss->shared.r{reg_counter}[ii];")
+                    reg_vars.append(var_name)
+                    reg_counter += 1
+            
+            # Generate state index calculation
+            code.append("\t\t\t")
+            code.append(f"\t\t\t// Calculate state index (treating the {len(reg_vars)} variables as a {len(reg_vars)}-bit number)")
+            code.append("\t\t\tint state_idx = ")
+            state_parts = []
+            for i, var in enumerate(reg_vars):
+                bit_pos = len(reg_vars) - 1 - i
+                state_parts.append(f"({var} << {bit_pos})")
+            code.append(" | ".join(state_parts) + ";")
+            code.append("\t\t\tstates[state_idx]++;")
+            code.append("\t\t\t")
+            
+            # Generate condition check
+            code.append("\t\t\t// Check if this iteration matches the exists clause")
+            code.append("\t\t\tif (")
+            conditions = []
+            reg_counter = 1
+            for proc in self.parser.processes:
+                proc_id = proc['id']
+                for reg in proc.get('registers', []):
+                    # Find the expected value for this register
+                    expected_value = None
+                    for cond_proc_id, cond_reg, cond_value in self.parser.conditions:
+                        if cond_proc_id == proc_id and cond_reg == reg:
+                            expected_value = cond_value
+                            break
+                    if expected_value is not None:
+                        conditions.append(f"p{proc_id}_{reg} == {expected_value}")
+                    reg_counter += 1
+            
+            code.append(" && ".join(conditions) + ") {")
             code.append("\t\t\t\tmatches++;")
             code.append("\t\t\t} else {")
             code.append("\t\t\t\tnon_matches++;")
@@ -697,24 +773,26 @@ class BPFGenerator:
         # Print progress
         code.append("\t\t// Print progress in verbose mode or every 100,000 iterations")
         code.append("\t\tif (config.verbose && i && i % 10000 == 0) {")
-        code.append("\t\t\tprintf(\"\\rProgress: %d/%d iterations completed (%.1f%%)\", ")
-        code.append("\t\t\t\ti, config.iterations, (float)i/config.iterations*100);")
+        code.append("\t\t\tprintf(\"\\rProgress: %d/%d iterations (%.1f%%) - Matches: %d (%.4f%%)\", ")
+        code.append("\t\t\t\ti, config.iterations, (float)i/config.iterations*100,")
+        code.append("\t\t\t\tmatches, (float)matches/(i*1000)*100);")
         code.append("\t\t\tfflush(stdout);")
         code.append("\t\t} else if (!config.verbose && i && i % 100000 == 0) {")
-        code.append("\t\t\tprintf(\"\\nProgress: %d iterations completed (%.1f%%)\\n\", ")
-        code.append("\t\t\t\ti, (float)i/config.iterations*100);")
-        
-        # Print intermediate results
-        if self.parser.conditions:
-            code.append("\t\t\tprintf(\"Results till now:\\n\");")
-            code.append("\t\t\tprintf(\"Matches (");
-            conditions = []
-            for proc_id, reg, value in self.parser.conditions:
-                conditions.append(f"{proc_id}:{reg}={value}")
-            code.append(" /\\ ".join(conditions))
-            code.append("): %d (%.2f%%)\\n\", matches, (float)matches/(i*1000)*100);")
-            code.append("\t\t\tprintf(\"Non-matches: %d (%.2f%%)\\n\", non_matches, (float)non_matches/(i*1000)*100);")
-        
+        code.append("\t\t\tprintf(\"\\n[%d/%d] %.1f%% complete | \", ")
+        code.append("\t\t\t\ti, config.iterations, (float)i/config.iterations*100);")
+        code.append("\t\t\t")
+        code.append("\t\t\t// Show CPU configuration if using random CPUs")
+        code.append("\t\t\tif (config.random_cpus) {")
+        code.append("\t\t\t\tprintf(\"CPUs: \");")
+        for i in range(num_processes):
+            code.append(f"\t\t\t\tprintf(\"%d\", config.cpu{i+1});")
+            if i < num_processes - 1:
+                code.append(f"\t\t\t\tprintf(\",\");")
+        code.append("\t\t\t\tprintf(\" | \");")
+        code.append("\t\t\t}")
+        code.append("\t\t\t")
+        code.append("\t\t\t// Show match statistics")
+        code.append("\t\t\tprintf(\"Matches: %d (%.4f%%)\\n\", matches, (float)matches/(i*1000)*100);")
         code.append("\t\t}")
         code.append("\t}")
         code.append("\t")
@@ -724,26 +802,126 @@ class BPFGenerator:
         code.append("\tpthread_barrier_destroy(&barrier);")
         code.append("\t")
         
-        # Print final results
+        # Print final results in litmus test format
         code.append("\tclock_gettime(CLOCK_MONOTONIC, &end_time);")
         code.append("\telapsed_time = (end_time.tv_sec - start_time.tv_sec) + ")
         code.append("\t\t       (end_time.tv_nsec - start_time.tv_nsec) / 1e9;")
         code.append("")
-        code.append("\tprintf(\"\\n\\nResults after %d iterations (completed in %.2f seconds):\\n\", ")
-        code.append("\t\tconfig.iterations, elapsed_time);")
+        
+        # Generate litmus test output format
+        test_name = self.parser.test_name
+        code.append("\t// Get current time")
+        code.append("\ttime_t now = time(NULL);")
+        code.append("\tstruct tm *tm_info = localtime(&now);")
+        code.append("\tchar time_str[26];")
+        code.append("\tstrftime(time_str, 26, \"%a %b %d %H:%M:%S %Z %Y\", tm_info);")
+        code.append("")
+        code.append("\t// Print test header")
+        code.append(f"\tprintf(\"Test {test_name} Allowed\\n\");")
+        code.append("\t")
         
         if self.parser.conditions:
-            code.append("\tprintf(\"Exists clause: (");
-            code.append(" /\\ ".join(conditions))
-            code.append(")\\n\");")
-            code.append("\tprintf(\"Matches: %d (%.2f%%)\\n\", matches, (float)matches/(config.iterations*1000)*100);")
-            code.append("\tprintf(\"Non-matches: %d (%.2f%%)\\n\", non_matches, (float)non_matches/(config.iterations*1000)*100);")
-            code.append("\tprintf(\"Weak memory behavior %s\\n\", matches > 0 ? \"observed\" : \"not observed\");")
+            # Calculate number of states and generate state names
+            num_registers = sum(len(proc.get('registers', [])) for proc in self.parser.processes)
+            num_states = 2 ** num_registers
+            
+            code.append("\t// Count how many states have non-zero occurrences")
+            code.append("\tint active_states = 0;")
+            code.append(f"\tfor (int i = 0; i < {num_states}; i++) {{")
+            code.append("\t\tif (states[i] > 0) active_states++;")
+            code.append("\t}")
+            code.append("\t")
+            code.append("\t// Print histogram header")
+            code.append("\tprintf(\"Histogram (%d states)\\n\", active_states);")
+            code.append("\t")
+            
+            # Generate state names array
+            code.append("\t// Print each state with its count")
+            code.append(f"\tconst char* state_names[{num_states}] = {{")
+            
+            # Generate all possible state combinations
+            for state_idx in range(num_states):
+                state_parts = []
+                bit_pos = num_registers - 1
+                for proc in self.parser.processes:
+                    proc_id = proc['id']
+                    for reg in proc.get('registers', []):
+                        bit_value = (state_idx >> bit_pos) & 1
+                        state_parts.append(f"{proc_id}:{reg}={bit_value}")
+                        bit_pos -= 1
+                state_name = "; ".join(state_parts) + ";"
+                if state_idx < num_states - 1:
+                    code.append(f"\t\t\"{state_name}\",")
+                else:
+                    code.append(f"\t\t\"{state_name}\"")
+            
+            code.append("\t};")
+            code.append("\t")
+            
+            # Find the target state index
+            target_state_idx = 0
+            bit_pos = num_registers - 1
+            for proc in self.parser.processes:
+                proc_id = proc['id']
+                for reg in proc.get('registers', []):
+                    # Find expected value for this register
+                    expected_value = 0  # default
+                    for cond_proc_id, cond_reg, cond_value in self.parser.conditions:
+                        if cond_proc_id == proc_id and cond_reg == reg:
+                            expected_value = cond_value
+                            break
+                    if expected_value == 1:
+                        target_state_idx |= (1 << bit_pos)
+                    bit_pos -= 1
+            
+            code.append(f"\tfor (int i = 0; i < {num_states}; i++) {{")
+            code.append("\t\tif (states[i] > 0) {")
+            code.append("\t\t\t// Mark the target state with an asterisk")
+            code.append(f"\t\t\tif (i == {target_state_idx}) {{ // Target state")
+            code.append("\t\t\t\tprintf(\"%-8lu *>%s\\n\", states[i], state_names[i]);")
+            code.append("\t\t\t} else {")
+            code.append("\t\t\t\tprintf(\"%-8lu :>%s\\n\", states[i], state_names[i]);")
+            code.append("\t\t\t}")
+            code.append("\t\t}")
+            code.append("\t}")
+            code.append("\t")
+            
+            # Print validation result
+            code.append("\t// Print validation result")
+            code.append("\tprintf(\"%s\\n\\n\", matches > 0 ? \"Ok\" : \"No\");")
+            code.append("\t")
+            
+            # Print witness counts
+            code.append("\t// Print witness counts")
+            code.append("\tprintf(\"Witnesses\\n\");")
+            code.append("\tprintf(\"Positive: %d, Negative: %d\\n\", matches, non_matches);")
+            
+            # Generate exists clause string
+            conditions = []
+            for proc_id, reg, value in self.parser.conditions:
+                conditions.append(f"{proc_id}:{reg}={value}")
+            exists_str = " /\\\\ ".join(conditions)
+            code.append(f"\tprintf(\"Condition exists ({exists_str}) is %s\\n\", ")
+            code.append("\t\tmatches > 0 ? \"validated\" : \"NOT validated\");")
+            code.append("\t")
+            
+            # Print observation summary
+            code.append("\t// Print observation summary")
+            code.append("\tconst char* result_type = matches > 0 ? \"Sometimes\" : \"Never\";")
+            code.append(f"\tprintf(\"Observation {test_name} %s %d %d\\n\", ")
+            code.append("\t\tresult_type, matches, non_matches);")
+            code.append(f"\tprintf(\"Time {test_name} %.2f\\n\\n\", elapsed_time);")
+            code.append("\t")
+            
+            # Print timestamp
+            code.append("\t// Print timestamp")
+            code.append("\tprintf(\"%s\\n\", time_str);")
         
         # Cleanup and return
+        test_name_lower = self.parser.test_name.lower().replace('+', '_')
         code.append("")
         code.append("cleanup:")
-        code.append("\ttest_bpf__destroy(skel);")
+        code.append(f"\t{test_name_lower}_bpf__destroy(skel);")
         code.append("\treturn -err;")
         code.append("}")
         
