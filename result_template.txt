@@ -1,0 +1,101 @@
+	// Add counters for different outcomes
+	int r1_0_r2_0 = 0, r1_0_r2_1 = 0, r1_1_r2_0 = 0, r1_1_r2_1 = 0;
+	int r3_0_r4_0 = 0, r3_0_r4_1 = 0, r3_1_r4_0 = 0, r3_1_r4_1 = 0;
+	int matches = 0, non_matches = 0;
+
+	// ... (rest of the code)
+
+	// Check results
+	for (int ii=0; ii<1000; ii++) {
+		// Get the values for this iteration
+		int p1_r0 = skel->bss->shared.r1[ii];
+		int p1_r1 = skel->bss->shared.r2[ii];
+		int p3_r0 = skel->bss->shared.r3[ii];
+		int p3_r1 = skel->bss->shared.r4[ii];
+		
+		// Count all possible outcomes for P1
+		if (p1_r0 == 0 && p1_r1 == 0) r1_0_r2_0++;
+		else if (p1_r0 == 0 && p1_r1 == 1) r1_0_r2_1++;
+		else if (p1_r0 == 1 && p1_r1 == 0) r1_1_r2_0++;
+		else if (p1_r0 == 1 && p1_r1 == 1) r1_1_r2_1++;
+		
+		// Count all possible outcomes for P3
+		if (p3_r0 == 0 && p3_r1 == 0) r3_0_r4_0++;
+		else if (p3_r0 == 0 && p3_r1 == 1) r3_0_r4_1++;
+		else if (p3_r0 == 1 && p3_r1 == 0) r3_1_r4_0++;
+		else if (p3_r0 == 1 && p3_r1 == 1) r3_1_r4_1++;
+		
+		// Check if this iteration matches the exists clause
+		if (p1_r0 == 1 && p1_r1 == 0 && p3_r0 == 1 && p3_r1 == 0) {
+			matches++;
+		} else {
+			non_matches++;
+		}
+	}
+
+	// Print progress in verbose mode or every 100,000 iterations
+	if (config.verbose && i && i % 10000 == 0) {
+		printf("\rProgress: %d/%d iterations (%.1f%%) - Matches: %d (%.4f%%)", 
+			i, config.iterations, (float)i/config.iterations*100,
+			matches, (float)matches/(i*1000)*100);
+		fflush(stdout);
+	} else if (!config.verbose && i && i % 100000 == 0) {
+		printf("\n[%d/%d] %.1f%% complete | ", 
+			i, config.iterations, (float)i/config.iterations*100);
+		
+		// Show CPU configuration if using random CPUs
+		if (config.random_cpus) {
+			printf("CPUs: %d,%d,%d,%d | ", 
+				config.cpu1, config.cpu2, config.cpu3, config.cpu4);
+		}
+		
+		// Show match statistics
+		printf("Matches: %d (%.4f%%)\n", matches, (float)matches/(i*1000)*100);
+		
+		// Show a visual indicator of whether matches were found
+		if (matches > 0) {
+			printf("  ► Weak memory behavior detected! (%d matches so far)\n", matches);
+		}
+	}
+
+	// ... (rest of the code)
+
+	printf("\n\n========================================================\n");
+	printf("LITMUS TEST RESULTS: %s\n", "TEST_NAME");
+	printf("========================================================\n");
+	printf("Test completed in %.2f seconds\n", elapsed_time);
+	printf("Total iterations: %d (%.2f million)\n", config.iterations, config.iterations/1000000.0);
+	printf("Iterations per second: %.2f million\n", (config.iterations/elapsed_time)/1000000.0);
+	printf("\n");
+	
+	printf("MEMORY MODEL BEHAVIOR:\n");
+	printf("  Exists clause: (EXISTS_CLAUSE)\n");
+	printf("  Matches: %d (%.4f%%)\n", matches, (float)matches/(config.iterations*1000)*100);
+	printf("  Non-matches: %d (%.4f%%)\n", non_matches, (float)non_matches/(config.iterations*1000)*100);
+	
+	printf("\nDETAILED OUTCOME DISTRIBUTION:\n");
+	printf("  Process P1 (r0,r1):\n");
+	printf("    (0,0): %d (%.4f%%)\n", r1_0_r2_0, (float)r1_0_r2_0/(config.iterations*1000)*100);
+	printf("    (0,1): %d (%.4f%%)\n", r1_0_r2_1, (float)r1_0_r2_1/(config.iterations*1000)*100);
+	printf("    (1,0): %d (%.4f%%)\n", r1_1_r2_0, (float)r1_1_r2_0/(config.iterations*1000)*100);
+	printf("    (1,1): %d (%.4f%%)\n", r1_1_r2_1, (float)r1_1_r2_1/(config.iterations*1000)*100);
+	
+	printf("  Process P3 (r0,r1):\n");
+	printf("    (0,0): %d (%.4f%%)\n", r3_0_r4_0, (float)r3_0_r4_0/(config.iterations*1000)*100);
+	printf("    (0,1): %d (%.4f%%)\n", r3_0_r4_1, (float)r3_0_r4_1/(config.iterations*1000)*100);
+	printf("    (1,0): %d (%.4f%%)\n", r3_1_r4_0, (float)r3_1_r4_0/(config.iterations*1000)*100);
+	printf("    (1,1): %d (%.4f%%)\n", r3_1_r4_1, (float)r3_1_r4_1/(config.iterations*1000)*100);
+	
+	printf("\nRESULT INTERPRETATION:\n");
+	if (matches > 0) {
+		printf("  [✓] Weak memory behavior OBSERVED\n");
+		printf("  This indicates the hardware exhibits relaxed memory ordering\n");
+		printf("  as specified in the litmus test conditions.\n");
+	} else {
+		printf("  [✗] Weak memory behavior NOT OBSERVED\n");
+		printf("  This could indicate either:\n");
+		printf("  - The hardware enforces stronger memory ordering than required\n");
+		printf("  - The test parameters need adjustment (more iterations, different CPUs)\n");
+		printf("  - The specific interleaving was not triggered during testing\n");
+	}
+	printf("========================================================\n");
