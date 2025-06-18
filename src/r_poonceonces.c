@@ -348,7 +348,7 @@ prog1_fd < 0 || prog2_fd < 0
 			
 			// Calculate state index (treating the 2 variables as a 2-bit number)
 			int state_idx = 
-(p1_r0 << 1) | (var_y << 0);
+(p1_r0 << 1) | ((var_y == 2) << 0);
 			states[state_idx]++;
 			
 			// Check if this iteration matches the exists clause
@@ -411,15 +411,15 @@ p1_r0 == 0 && var_y == 2) {
 	// Print each state with its count
 	const char* state_names[4] = {
 		"1:r0=0; y=0;",
-		"1:r0=0; y=1;",
+		"1:r0=0; y=2;",
 		"1:r0=1; y=0;",
-		"1:r0=1; y=1;"
+		"1:r0=1; y=2;"
 	};
 	
 	for (int i = 0; i < 4; i++) {
 		if (states[i] > 0) {
 			// Mark the target state with an asterisk
-			if (i == 0) { // Target state
+			if (i == 1) { // Target state
 				printf("%-8lu *>%s\n", states[i], state_names[i]);
 			} else {
 				printf("%-8lu :>%s\n", states[i], state_names[i]);

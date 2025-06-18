@@ -766,8 +766,18 @@ class BPFGenerator:
                 state_parts = []
                 for i, var in enumerate(all_vars):
                     bit_pos = len(all_vars) - 1 - i
-                    if bit_pos == 0:
-                        state_parts.append(f"({var} << {bit_pos})")
+                    if var.startswith('var_'):
+                        # For variable conditions, check if it matches the expected value
+                        var_name = var[4:]  # Remove 'var_' prefix
+                        expected_val = None
+                        for v, val in getattr(self.parser, 'variable_conditions', []):
+                            if v == var_name:
+                                expected_val = val
+                                break
+                        if expected_val is not None:
+                            state_parts.append(f"(({var} == {expected_val}) << {bit_pos})")
+                        else:
+                            state_parts.append(f"(({var} != 0) << {bit_pos})")
                     else:
                         state_parts.append(f"({var} << {bit_pos})")
                 code.append(" | ".join(state_parts) + ";")
@@ -793,7 +803,11 @@ class BPFGenerator:
             
             # Add variable conditions
             for var, expected_value in getattr(self.parser, 'variable_conditions', []):
-                conditions.append(f"var_{var} == {expected_value}")
+                # For binary state calculation, treat non-zero values as 1
+                if expected_value == 0:
+                    conditions.append(f"var_{var} == 0")
+                else:
+                    conditions.append(f"var_{var} == {expected_value}")  # Keep exact value for condition check
             
             if conditions:
                 code.append("\t\t\tif (")
@@ -890,9 +904,15 @@ class BPFGenerator:
                         bit_pos -= 1
                 
                 # Add variable states
-                for var, _ in getattr(self.parser, 'variable_conditions', []):
+                for var, expected_value in getattr(self.parser, 'variable_conditions', []):
                     bit_value = (state_idx >> bit_pos) & 1
-                    state_parts.append(f"{var}={bit_value}")
+                    # For variable conditions, show the expected value when bit is 1, otherwise show a different value
+                    if bit_value == 1:
+                        state_parts.append(f"{var}={expected_value}")
+                    else:
+                        # Show a different value (0 if expected is non-zero, or expected+1 if expected is 0)
+                        other_value = 0 if expected_value != 0 else 1
+                        state_parts.append(f"{var}={other_value}")
                     bit_pos -= 1
                 
                 state_name = "; ".join(state_parts) + ";"
@@ -924,8 +944,8 @@ class BPFGenerator:
             
             # Process variable conditions
             for var, expected_value in getattr(self.parser, 'variable_conditions', []):
-                if expected_value == 1:
-                    target_state_idx |= (1 << bit_pos)
+                # For state calculation, we use 1 if the variable matches the expected value
+                target_state_idx |= (1 << bit_pos)  # Always set to 1 since we're looking for the match
                 bit_pos -= 1
             
             code.append(f"\tfor (int i = 0; i < {num_states}; i++) {{")
