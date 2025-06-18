@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-/* Auto-generated from IRIW+poonceonces+OnceOnce.litmus */
+/* Auto-generated from CoRR+poonceonce+Once.litmus */
 #define _GNU_SOURCE
 #include <sched.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/resource.h>
 #include <bpf/libbpf.h>
-#include "iriw_poonceonces_onceonce.skel.h"
+#include "corr_poonceonce_once.skel.h"
 #include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
@@ -34,8 +34,6 @@ struct test_config {
     int iterations;
     int cpu1;
     int cpu2;
-    int cpu3;
-    int cpu4;
     int verbose;
     bool random_cpus;
 };
@@ -43,7 +41,7 @@ struct test_config {
 struct worker_args {
     int cpu;
     int prog_fd;
-    struct iriw_poonceonces_onceonce_bpf *skel;
+    struct corr_poonceonce_once_bpf *skel;
     pthread_barrier_t *barrier;  // Add barrier for synchronization
 };
 
@@ -166,14 +164,11 @@ void *worker(void *arg)
     return NULL;
 }
 
-void reset_state(struct iriw_poonceonces_onceonce_bpf *skel) {
+void reset_state(struct corr_poonceonce_once_bpf *skel) {
 	memset(skel->bss, 0, sizeof(*skel->bss));
 	memset(skel->bss->shared.x, 0, sizeof(int) * 1000);
-	memset(skel->bss->shared.y, 0, sizeof(int) * 1000);
 	memset(skel->bss->shared.r1, 0, sizeof(int) * 1000);
 	memset(skel->bss->shared.r2, 0, sizeof(int) * 1000);
-	memset(skel->bss->shared.r3, 0, sizeof(int) * 1000);
-	memset(skel->bss->shared.r4, 0, sizeof(int) * 1000);
 }
 
 void print_usage(const char *prog_name) {
@@ -182,8 +177,6 @@ void print_usage(const char *prog_name) {
     printf("  -i, --iterations NUM   Number of test iterations (default: 1000000)\n");
     printf("  -c1, --cpu1 NUM       CPU ID for P0 thread (default: 0)\n");
     printf("  -c2, --cpu2 NUM       CPU ID for P1 thread (default: 1)\n");
-    printf("  -c3, --cpu3 NUM       CPU ID for P2 thread (default: 2)\n");
-    printf("  -c4, --cpu4 NUM       CPU ID for P3 thread (default: 3)\n");
     printf("  -d, --delay NUM        Delay factor to increase contention (default: 10000)\n");
     printf("  -r, --random-cpus      Randomly select CPUs for each iteration\n");
     printf("  -v, --verbose          Enable verbose output\n");
@@ -192,37 +185,29 @@ void print_usage(const char *prog_name) {
 
 int main(int argc, char **argv)
 {
-	struct iriw_poonceonces_onceonce_bpf *skel;
+	struct corr_poonceonce_once_bpf *skel;
 	int err;
 	struct test_config config = {
 		.iterations = 1000000,
 		.cpu1 = 0,
 		.cpu2 = 1,
-		.cpu3 = 2,
-		.cpu4 = 3,
 		.verbose = 0,
 		.random_cpus = false
 	};
-	// Add counters for all possible states (16 states for 4 binary variables)
-	unsigned long states[16] = {0};
+	// Add counters for all possible states (4 states for 2 binary variables)
+	unsigned long states[4] = {0};
 	int matches = 0, non_matches = 0;
 	// Thread variables
 	pthread_t t0;
 	pthread_t t1;
-	pthread_t t2;
-	pthread_t t3;
 	struct timespec start_time, end_time;
 	double elapsed_time;
 	// Program file descriptors
 	int prog1_fd;
 	int prog2_fd;
-	int prog3_fd;
-	int prog4_fd;
 	// Worker arguments
 	struct worker_args args1;
 	struct worker_args args2;
-	struct worker_args args3;
-	struct worker_args args4;
 	pthread_barrier_t barrier;
 
 	// Parse command line options
@@ -230,8 +215,6 @@ int main(int argc, char **argv)
 		{"iterations", required_argument, 0, 'i'},
 		{"cpu1", required_argument, 0, '1'},
 		{"cpu2", required_argument, 0, '2'},
-		{"cpu3", required_argument, 0, '3'},
-		{"cpu4", required_argument, 0, '4'},
 		{"delay", required_argument, 0, 'd'},
 		{"random-cpus", no_argument, 0, 'r'},
 		{"verbose", no_argument, 0, 'v'},
@@ -244,8 +227,6 @@ int main(int argc, char **argv)
 	char optstring[50] = "i:rvhd:";
 	strcat(optstring, "1:");
 	strcat(optstring, "2:");
-	strcat(optstring, "3:");
-	strcat(optstring, "4:");
 
 	while ((opt = getopt_long(argc, argv, optstring, long_options, &option_index)) != -1) {
 		switch (opt) {
@@ -257,12 +238,6 @@ int main(int argc, char **argv)
 			break;
 		case '2':
 			config.cpu2 = atoi(optarg);
-			break;
-		case '3':
-			config.cpu3 = atoi(optarg);
-			break;
-		case '4':
-			config.cpu4 = atoi(optarg);
 			break;
 		case 'd':
 			// Delay option (not implemented in this version)
@@ -286,14 +261,14 @@ int main(int argc, char **argv)
 	libbpf_set_print(libbpf_print_fn);
 
 	/* Open BPF application */
-	skel = iriw_poonceonces_onceonce_bpf__open();
+	skel = corr_poonceonce_once_bpf__open();
 	if (!skel) {
 		fprintf(stderr, "Failed to open BPF skeleton\n");
 		return 1;
 	}
 
 	/* Load & verify BPF programs */
-	err = iriw_poonceonces_onceonce_bpf__load(skel);
+	err = corr_poonceonce_once_bpf__load(skel);
 	if (err) {
 		fprintf(stderr, "Failed to load and verify BPF skeleton\n");
 		goto cleanup;
@@ -302,11 +277,9 @@ int main(int argc, char **argv)
 	/* Get program file descriptors */
 	prog1_fd = bpf_program__fd(skel->progs.handle_tp1);
 	prog2_fd = bpf_program__fd(skel->progs.handle_tp2);
-	prog3_fd = bpf_program__fd(skel->progs.handle_tp3);
-	prog4_fd = bpf_program__fd(skel->progs.handle_tp4);
 	
 	if (
-prog1_fd < 0 || prog2_fd < 0 || prog3_fd < 0 || prog4_fd < 0
+prog1_fd < 0 || prog2_fd < 0
 ) {
 		fprintf(stderr, "Failed to get program file descriptors\n");
 		err = -1;
@@ -314,13 +287,11 @@ prog1_fd < 0 || prog2_fd < 0 || prog3_fd < 0 || prog4_fd < 0
 	}
 
 	printf("Starting litmus test with configuration:\n");
-	printf("  Test: %s\n", "IRIW+poonceonces+OnceOnce");
+	printf("  Test: %s\n", "CoRR+poonceonce+Once");
 	printf("  Iterations: %d\n", config.iterations);
 	if (!config.random_cpus) {
 		printf("  CPU1 (P0): %d\n", config.cpu1);
 		printf("  CPU2 (P1): %d\n", config.cpu2);
-		printf("  CPU3 (P2): %d\n", config.cpu3);
-		printf("  CPU4 (P3): %d\n", config.cpu4);
 	} else {
 		printf("  Using random CPU sets for each iteration\n");
 		printf("  Available CPUs: %d\n", get_available_cpus());
@@ -329,7 +300,7 @@ prog1_fd < 0 || prog2_fd < 0 || prog3_fd < 0 || prog4_fd < 0
 	clock_gettime(CLOCK_MONOTONIC, &start_time);
 
 	/* Initialize barrier for thread synchronization */
-	if (pthread_barrier_init(&barrier, NULL, 4) != 0) {
+	if (pthread_barrier_init(&barrier, NULL, 2) != 0) {
 		fprintf(stderr, "Failed to initialize barrier\n");
 		err = -1;
 		goto cleanup;
@@ -341,18 +312,14 @@ prog1_fd < 0 || prog2_fd < 0 || prog3_fd < 0 || prog4_fd < 0
 		
 		// Select random CPUs if enabled
 		if (config.random_cpus) {
-			int cpus[4];
-			select_random_cpus(cpus, 4);
+			int cpus[2];
+			select_random_cpus(cpus, 2);
 			config.cpu1 = cpus[0];
 			config.cpu2 = cpus[1];
-			config.cpu3 = cpus[2];
-			config.cpu4 = cpus[3];
 			if (config.verbose && i && i % 10000 == 0) {
 				printf("\nUsing CPUs ");
 				printf("%d ", config.cpu1);
 				printf("%d ", config.cpu2);
-				printf("%d ", config.cpu3);
-				printf("%d ", config.cpu4);
 				printf("\n");
 			}
 		}
@@ -366,41 +333,27 @@ prog1_fd < 0 || prog2_fd < 0 || prog3_fd < 0 || prog4_fd < 0
 		args2.prog_fd = prog2_fd;
 		args2.skel = skel;
 		args2.barrier = &barrier;
-		args3.cpu = config.cpu3;
-		args3.prog_fd = prog3_fd;
-		args3.skel = skel;
-		args3.barrier = &barrier;
-		args4.cpu = config.cpu4;
-		args4.prog_fd = prog4_fd;
-		args4.skel = skel;
-		args4.barrier = &barrier;
 
 		// Create threads and run BPF programs on specific CPUs
 		pthread_create(&t0, NULL, worker, &args1);
 		pthread_create(&t1, NULL, worker, &args2);
-		pthread_create(&t2, NULL, worker, &args3);
-		pthread_create(&t3, NULL, worker, &args4);
 		pthread_join(t0, NULL);
 		pthread_join(t1, NULL);
-		pthread_join(t2, NULL);
-		pthread_join(t3, NULL);
 
 		// Check results
 		for (int ii=0; ii<1000; ii++) {
 			// Get the values for this iteration
 			int p1_r0 = skel->bss->shared.r1[ii];
 			int p1_r1 = skel->bss->shared.r2[ii];
-			int p3_r0 = skel->bss->shared.r3[ii];
-			int p3_r1 = skel->bss->shared.r4[ii];
 			
-			// Calculate state index (treating the 4 variables as a 4-bit number)
+			// Calculate state index (treating the 2 variables as a 2-bit number)
 			int state_idx = 
-(p1_r0 << 3) | (p1_r1 << 2) | (p3_r0 << 1) | (p3_r1 << 0);
+(p1_r0 << 1) | (p1_r1 << 0);
 			states[state_idx]++;
 			
 			// Check if this iteration matches the exists clause
 			if (
-p1_r0 == 1 && p1_r1 == 0 && p3_r0 == 1 && p3_r1 == 0) {
+p1_r0 == 1 && p1_r1 == 0) {
 				matches++;
 			} else {
 				non_matches++;
@@ -422,15 +375,16 @@ p1_r0 == 1 && p1_r1 == 0 && p3_r0 == 1 && p3_r1 == 0) {
 				printf("%d", config.cpu1);
 				printf(",");
 				printf("%d", config.cpu2);
-				printf(",");
-				printf("%d", config.cpu3);
-				printf(",");
-				printf("%d", config.cpu4);
 				printf(" | ");
 			}
 			
 			// Show match statistics
 			printf("Matches: %d (%.4f%%)\n", matches, (float)matches/(i*1000)*100);
+			
+			// Show a visual indicator of whether matches were found
+			if (matches > 0) {
+				printf("  ► Weak memory behavior detected! (%d matches so far)\n", matches);
+			}
 		}
 	}
 	
@@ -448,11 +402,11 @@ p1_r0 == 1 && p1_r1 == 0 && p3_r0 == 1 && p3_r1 == 0) {
 	strftime(time_str, 26, "%a %b %d %H:%M:%S %Z %Y", tm_info);
 
 	// Print test header
-	printf("Test IRIW+poonceonces+OnceOnce Allowed\n");
+	printf("Test CoRR+poonceonce+Once Allowed\n");
 	
 	// Count how many states have non-zero occurrences
 	int active_states = 0;
-	for (int i = 0; i < 16; i++) {
+	for (int i = 0; i < 4; i++) {
 		if (states[i] > 0) active_states++;
 	}
 	
@@ -460,29 +414,17 @@ p1_r0 == 1 && p1_r1 == 0 && p3_r0 == 1 && p3_r1 == 0) {
 	printf("Histogram (%d states)\n", active_states);
 	
 	// Print each state with its count
-	const char* state_names[16] = {
-		"1:r0=0; 1:r1=0; 3:r0=0; 3:r1=0;",
-		"1:r0=0; 1:r1=0; 3:r0=0; 3:r1=1;",
-		"1:r0=0; 1:r1=0; 3:r0=1; 3:r1=0;",
-		"1:r0=0; 1:r1=0; 3:r0=1; 3:r1=1;",
-		"1:r0=0; 1:r1=1; 3:r0=0; 3:r1=0;",
-		"1:r0=0; 1:r1=1; 3:r0=0; 3:r1=1;",
-		"1:r0=0; 1:r1=1; 3:r0=1; 3:r1=0;",
-		"1:r0=0; 1:r1=1; 3:r0=1; 3:r1=1;",
-		"1:r0=1; 1:r1=0; 3:r0=0; 3:r1=0;",
-		"1:r0=1; 1:r1=0; 3:r0=0; 3:r1=1;",
-		"1:r0=1; 1:r1=0; 3:r0=1; 3:r1=0;",
-		"1:r0=1; 1:r1=0; 3:r0=1; 3:r1=1;",
-		"1:r0=1; 1:r1=1; 3:r0=0; 3:r1=0;",
-		"1:r0=1; 1:r1=1; 3:r0=0; 3:r1=1;",
-		"1:r0=1; 1:r1=1; 3:r0=1; 3:r1=0;",
-		"1:r0=1; 1:r1=1; 3:r0=1; 3:r1=1;"
+	const char* state_names[4] = {
+		"1:r0=0; 1:r1=0;",
+		"1:r0=0; 1:r1=1;",
+		"1:r0=1; 1:r1=0;",
+		"1:r0=1; 1:r1=1;"
 	};
 	
-	for (int i = 0; i < 16; i++) {
+	for (int i = 0; i < 4; i++) {
 		if (states[i] > 0) {
 			// Mark the target state with an asterisk
-			if (i == 10) { // Target state
+			if (i == 2) { // Target state
 				printf("%-8lu *>%s\n", states[i], state_names[i]);
 			} else {
 				printf("%-8lu :>%s\n", states[i], state_names[i]);
@@ -496,19 +438,19 @@ p1_r0 == 1 && p1_r1 == 0 && p3_r0 == 1 && p3_r1 == 0) {
 	// Print witness counts
 	printf("Witnesses\n");
 	printf("Positive: %d, Negative: %d\n", matches, non_matches);
-	printf("Condition exists (1:r0=1 /\\ 1:r1=0 /\\ 3:r0=1 /\\ 3:r1=0) is %s\n", 
+	printf("Condition exists (1:r0=1 /\\ 1:r1=0) is %s\n", 
 		matches > 0 ? "validated" : "NOT validated");
 	
 	// Print observation summary
 	const char* result_type = matches > 0 ? "Sometimes" : "Never";
-	printf("Observation IRIW+poonceonces+OnceOnce %s %d %d\n", 
+	printf("Observation CoRR+poonceonce+Once %s %d %d\n", 
 		result_type, matches, non_matches);
-	printf("Time IRIW+poonceonces+OnceOnce %.2f\n\n", elapsed_time);
+	printf("Time CoRR+poonceonce+Once %.2f\n\n", elapsed_time);
 	
 	// Print timestamp
 	printf("%s\n", time_str);
 
 cleanup:
-	iriw_poonceonces_onceonce_bpf__destroy(skel);
+	corr_poonceonce_once_bpf__destroy(skel);
 	return -err;
 }

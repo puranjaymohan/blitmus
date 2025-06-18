@@ -97,19 +97,33 @@ class LitmusParser:
     def parse_exists_clause(self):
         """Parse the exists clause to extract conditions"""
         self.conditions = []
+        self.variable_conditions = []  # For direct variable conditions like y=2
         if not self.exists_clause:
             return
             
         # Split by logical AND
         parts = re.split(r'\s*/\\\s*', self.exists_clause)
         for part in parts:
-            # Extract process ID, register, and expected value
-            match = re.search(r'(\d+):(\w+)=(\d+)', part)
-            if match:
-                proc_id = int(match.group(1))
-                reg = match.group(2)
-                value = int(match.group(3))
+            part = part.strip()
+            
+            # Try to match process:register=value pattern
+            proc_reg_match = re.search(r'(\d+):(\w+)=(\d+)', part)
+            if proc_reg_match:
+                proc_id = int(proc_reg_match.group(1))
+                reg = proc_reg_match.group(2)
+                value = int(proc_reg_match.group(3))
                 self.conditions.append((proc_id, reg, value))
+                continue
+            
+            # Try to match direct variable=value pattern
+            var_match = re.search(r'(\w+)=(\d+)', part)
+            if var_match:
+                var = var_match.group(1)
+                value = int(var_match.group(2))
+                self.variable_conditions.append((var, value))
+                continue
+            
+            print(f"Warning: Could not parse exists clause part: {part}")
 
     def get_summary(self) -> str:
         """Return a summary of the parsed litmus test"""
@@ -128,6 +142,8 @@ class LitmusParser:
             summary.append("Conditions:")
             for proc_id, reg, value in self.conditions:
                 summary.append(f"  P{proc_id}:{reg}={value}")
+            for var, value in getattr(self, 'variable_conditions', []):
+                summary.append(f"  {var}={value}")
         
         return "\n".join(summary)
 
@@ -521,11 +537,13 @@ class BPFGenerator:
         code.append("\t};")
         
         # Add result counters based on the exists clause
-        if self.parser.conditions:
-            # Calculate the number of states (2^number_of_registers)
+        if self.parser.conditions or getattr(self.parser, 'variable_conditions', []):
+            # Calculate the number of states (2^(number_of_registers + number_of_variables))
             num_registers = sum(len(proc.get('registers', [])) for proc in self.parser.processes)
-            num_states = 2 ** num_registers
-            code.append(f"\t// Add counters for all possible states ({num_states} states for {num_registers} binary variables)")
+            num_variables = len(getattr(self.parser, 'variable_conditions', []))
+            total_conditions = num_registers + num_variables
+            num_states = 2 ** total_conditions if total_conditions > 0 else 2
+            code.append(f"\t// Add counters for all possible states ({num_states} states for {total_conditions} binary variables)")
             code.append(f"\tunsigned long states[{num_states}] = {{0}};")
             code.append("\tint matches = 0, non_matches = 0;")
         
@@ -719,7 +737,7 @@ class BPFGenerator:
         code.append("\t\tfor (int ii=0; ii<1000; ii++) {")
         
         # Generate result checking code based on exists clause
-        if self.parser.conditions:
+        if self.parser.conditions or getattr(self.parser, 'variable_conditions', []):
             # Generate code to get register values
             code.append("\t\t\t// Get the values for this iteration")
             reg_counter = 1
@@ -732,23 +750,35 @@ class BPFGenerator:
                     reg_vars.append(var_name)
                     reg_counter += 1
             
+            # Generate code to get variable values (for variable conditions)
+            var_vars = []
+            for var, expected_value in getattr(self.parser, 'variable_conditions', []):
+                var_name = f"var_{var}"
+                code.append(f"\t\t\tint {var_name} = skel->bss->shared.{var}[ii];")
+                var_vars.append(var_name)
+            
             # Generate state index calculation
-            code.append("\t\t\t")
-            code.append(f"\t\t\t// Calculate state index (treating the {len(reg_vars)} variables as a {len(reg_vars)}-bit number)")
-            code.append("\t\t\tint state_idx = ")
-            state_parts = []
-            for i, var in enumerate(reg_vars):
-                bit_pos = len(reg_vars) - 1 - i
-                state_parts.append(f"({var} << {bit_pos})")
-            code.append(" | ".join(state_parts) + ";")
-            code.append("\t\t\tstates[state_idx]++;")
-            code.append("\t\t\t")
+            all_vars = reg_vars + var_vars
+            if all_vars:
+                code.append("\t\t\t")
+                code.append(f"\t\t\t// Calculate state index (treating the {len(all_vars)} variables as a {len(all_vars)}-bit number)")
+                code.append("\t\t\tint state_idx = ")
+                state_parts = []
+                for i, var in enumerate(all_vars):
+                    bit_pos = len(all_vars) - 1 - i
+                    if bit_pos == 0:
+                        state_parts.append(f"({var} << {bit_pos})")
+                    else:
+                        state_parts.append(f"({var} << {bit_pos})")
+                code.append(" | ".join(state_parts) + ";")
+                code.append("\t\t\tstates[state_idx]++;")
+                code.append("\t\t\t")
             
             # Generate condition check
             code.append("\t\t\t// Check if this iteration matches the exists clause")
-            code.append("\t\t\tif (")
             conditions = []
-            reg_counter = 1
+            
+            # Add register conditions
             for proc in self.parser.processes:
                 proc_id = proc['id']
                 for reg in proc.get('registers', []):
@@ -760,13 +790,18 @@ class BPFGenerator:
                             break
                     if expected_value is not None:
                         conditions.append(f"p{proc_id}_{reg} == {expected_value}")
-                    reg_counter += 1
             
-            code.append(" && ".join(conditions) + ") {")
-            code.append("\t\t\t\tmatches++;")
-            code.append("\t\t\t} else {")
-            code.append("\t\t\t\tnon_matches++;")
-            code.append("\t\t\t}")
+            # Add variable conditions
+            for var, expected_value in getattr(self.parser, 'variable_conditions', []):
+                conditions.append(f"var_{var} == {expected_value}")
+            
+            if conditions:
+                code.append("\t\t\tif (")
+                code.append(" && ".join(conditions) + ") {")
+                code.append("\t\t\t\tmatches++;")
+                code.append("\t\t\t} else {")
+                code.append("\t\t\t\tnon_matches++;")
+                code.append("\t\t\t}")
         
         code.append("\t\t}")
         
@@ -820,10 +855,12 @@ class BPFGenerator:
         code.append(f"\tprintf(\"Test {test_name} Allowed\\n\");")
         code.append("\t")
         
-        if self.parser.conditions:
+        if self.parser.conditions or getattr(self.parser, 'variable_conditions', []):
             # Calculate number of states and generate state names
             num_registers = sum(len(proc.get('registers', [])) for proc in self.parser.processes)
-            num_states = 2 ** num_registers
+            num_variables = len(getattr(self.parser, 'variable_conditions', []))
+            total_conditions = num_registers + num_variables
+            num_states = 2 ** total_conditions if total_conditions > 0 else 2
             
             code.append("\t// Count how many states have non-zero occurrences")
             code.append("\tint active_states = 0;")
@@ -842,13 +879,22 @@ class BPFGenerator:
             # Generate all possible state combinations
             for state_idx in range(num_states):
                 state_parts = []
-                bit_pos = num_registers - 1
+                bit_pos = total_conditions - 1
+                
+                # Add register states
                 for proc in self.parser.processes:
                     proc_id = proc['id']
                     for reg in proc.get('registers', []):
                         bit_value = (state_idx >> bit_pos) & 1
                         state_parts.append(f"{proc_id}:{reg}={bit_value}")
                         bit_pos -= 1
+                
+                # Add variable states
+                for var, _ in getattr(self.parser, 'variable_conditions', []):
+                    bit_value = (state_idx >> bit_pos) & 1
+                    state_parts.append(f"{var}={bit_value}")
+                    bit_pos -= 1
+                
                 state_name = "; ".join(state_parts) + ";"
                 if state_idx < num_states - 1:
                     code.append(f"\t\t\"{state_name}\",")
@@ -860,7 +906,9 @@ class BPFGenerator:
             
             # Find the target state index
             target_state_idx = 0
-            bit_pos = num_registers - 1
+            bit_pos = total_conditions - 1
+            
+            # Process register conditions
             for proc in self.parser.processes:
                 proc_id = proc['id']
                 for reg in proc.get('registers', []):
@@ -873,6 +921,12 @@ class BPFGenerator:
                     if expected_value == 1:
                         target_state_idx |= (1 << bit_pos)
                     bit_pos -= 1
+            
+            # Process variable conditions
+            for var, expected_value in getattr(self.parser, 'variable_conditions', []):
+                if expected_value == 1:
+                    target_state_idx |= (1 << bit_pos)
+                bit_pos -= 1
             
             code.append(f"\tfor (int i = 0; i < {num_states}; i++) {{")
             code.append("\t\tif (states[i] > 0) {")
@@ -900,6 +954,8 @@ class BPFGenerator:
             conditions = []
             for proc_id, reg, value in self.parser.conditions:
                 conditions.append(f"{proc_id}:{reg}={value}")
+            for var, value in getattr(self.parser, 'variable_conditions', []):
+                conditions.append(f"{var}={value}")
             exists_str = " /\\\\ ".join(conditions)
             code.append(f"\tprintf(\"Condition exists ({exists_str}) is %s\\n\", ")
             code.append("\t\tmatches > 0 ? \"validated\" : \"NOT validated\");")
