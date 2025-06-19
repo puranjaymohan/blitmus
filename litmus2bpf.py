@@ -245,6 +245,10 @@ class BPFGenerator:
             reg_num = self.reg_mapping.get((proc_id, reg), 0)
             return f"shared.r{reg_num}[i] = READ_ONCE(shared.{var}[i]);"
 
+        smp_mb_match = re.match(r'\s*smp_mb\(\s*\)\s*;?', op)
+        if smp_mb_match:
+            return "smp_mb();"
+
         # Default case - pass through (with a warning comment)
         return f"/* Unsupported operation: {op} */";
 
