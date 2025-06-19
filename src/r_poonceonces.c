@@ -37,18 +37,62 @@
 #define TEST_NAME r_poonceonces
 #define TEST_NAME_PRINT "R+poonceonces"
 #define EXISTS_CLAUSE "y=2 /\\ 1:r0=0"
+int states[10][10] = {0};
+int *expected_state_p = NULL;
 static void check_cond (STRUCT_NAME(TEST_NAME) *skel,
 			int *matches, int *non_matches, int c) {
 	// Get the values for this iteration
 	int p1_r0 = skel->bss->shared.r1[c];
 	int var_y = skel->bss->shared.y[c];
 	// Check if this iteration matches the exists clause
+	states[p1_r0][var_y]++;
 	if (p1_r0 == 0 && var_y == 2) {
 			*matches += 1;
+			expected_state_p = &states[p1_r0][var_y];
 	} else {
 			*non_matches += 1;
 	}
 }
+const char* var_names[] = {"p1_r0", "var_y"};
+
+void print_histogram() {
+    int total_states = 0;
+
+    for (int i0 = 0; i0 < 10; i0++) {
+        for (int i1 = 0; i1 < 10; i1++) {
+            if (states[i0][i1] > 0) total_states++;
+        }
+    }
+
+    printf("Histogram (%d states)\n", total_states);
+
+    for (int i0 = 0; i0 < 10; i0++) {
+        for (int i1 = 0; i1 < 10; i1++) {
+            int count = states[i0][i1];
+            if (count > 0) {
+                printf("%-8d ", count);
+                if (&states[i0][i1] == expected_state_p) printf("*");
+                else printf(":");
+                printf(">");
+                int idx_vals[] = {i0, i1};
+                for (int k = 0; k < 2; k++) {
+                    const char* name = var_names[k];
+                    if (name[0] == 'p') {
+                        int proc_id, reg_id;
+                        sscanf(name, "p%d_r%d", &proc_id, &reg_id);
+                        printf("%d:r%d=%d; ", proc_id, reg_id, idx_vals[k]);
+                    } else if (strncmp(name, "var_", 4) == 0) {
+                        printf("%s=%d; ", name+4, idx_vals[k]);
+                    } else {
+                        printf("%s=%d; ", name, idx_vals[k]);
+                    }
+                }
+                printf("\n");
+            }
+        }
+    }
+}
+
 /*****/
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
@@ -268,6 +312,8 @@ int main(int argc, char **argv)
 
         // Print test header
         printf("Test %s Allowed\n", TEST_NAME_PRINT);
+
+	print_histogram();
 
         // Print validation result
         printf("%s\n\n", matches > 0 ? "Ok" : "No");

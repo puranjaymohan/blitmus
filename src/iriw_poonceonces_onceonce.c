@@ -37,6 +37,8 @@
 #define TEST_NAME iriw_poonceonces_onceonce
 #define TEST_NAME_PRINT "IRIW+poonceonces+OnceOnce"
 #define EXISTS_CLAUSE "1:r0=1 /\\ 1:r1=0 /\\ 3:r0=1 /\\ 3:r1=0"
+int states[10][10][10][10] = {0};
+int *expected_state_p = NULL;
 static void check_cond (STRUCT_NAME(TEST_NAME) *skel,
 			int *matches, int *non_matches, int c) {
 	// Get the values for this iteration
@@ -45,12 +47,62 @@ static void check_cond (STRUCT_NAME(TEST_NAME) *skel,
 	int p3_r0 = skel->bss->shared.r3[c];
 	int p3_r1 = skel->bss->shared.r4[c];
 	// Check if this iteration matches the exists clause
+	states[p1_r0][p1_r1][p3_r0][p3_r1]++;
 	if (p1_r0 == 1 && p1_r1 == 0 && p3_r0 == 1 && p3_r1 == 0) {
 			*matches += 1;
+			expected_state_p = &states[p1_r0][p1_r1][p3_r0][p3_r1];
 	} else {
 			*non_matches += 1;
 	}
 }
+const char* var_names[] = {"p1_r0", "p1_r1", "p3_r0", "p3_r1"};
+
+void print_histogram() {
+    int total_states = 0;
+
+    for (int i0 = 0; i0 < 10; i0++) {
+        for (int i1 = 0; i1 < 10; i1++) {
+            for (int i2 = 0; i2 < 10; i2++) {
+                for (int i3 = 0; i3 < 10; i3++) {
+                    if (states[i0][i1][i2][i3] > 0) total_states++;
+                }
+            }
+        }
+    }
+
+    printf("Histogram (%d states)\n", total_states);
+
+    for (int i0 = 0; i0 < 10; i0++) {
+        for (int i1 = 0; i1 < 10; i1++) {
+            for (int i2 = 0; i2 < 10; i2++) {
+                for (int i3 = 0; i3 < 10; i3++) {
+                    int count = states[i0][i1][i2][i3];
+                    if (count > 0) {
+                        printf("%-8d ", count);
+                        if (&states[i0][i1][i2][i3] == expected_state_p) printf("*");
+                        else printf(":");
+                        printf(">");
+                        int idx_vals[] = {i0, i1, i2, i3};
+                        for (int k = 0; k < 4; k++) {
+                            const char* name = var_names[k];
+                            if (name[0] == 'p') {
+                                int proc_id, reg_id;
+                                sscanf(name, "p%d_r%d", &proc_id, &reg_id);
+                                printf("%d:r%d=%d; ", proc_id, reg_id, idx_vals[k]);
+                            } else if (strncmp(name, "var_", 4) == 0) {
+                                printf("%s=%d; ", name+4, idx_vals[k]);
+                            } else {
+                                printf("%s=%d; ", name, idx_vals[k]);
+                            }
+                        }
+                        printf("\n");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /*****/
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
@@ -270,6 +322,8 @@ int main(int argc, char **argv)
 
         // Print test header
         printf("Test %s Allowed\n", TEST_NAME_PRINT);
+
+	print_histogram();
 
         // Print validation result
         printf("%s\n\n", matches > 0 ? "Ok" : "No");

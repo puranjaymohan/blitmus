@@ -218,6 +218,8 @@ int main(int argc, char **argv)
         // Print test header
         printf("Test %s Allowed\n", TEST_NAME_PRINT);
 
+	print_histogram();
+
         // Print validation result
         printf("%s\n\n", matches > 0 ? "Ok" : "No");
 

@@ -252,6 +252,72 @@ class BPFGenerator:
         # Default case - pass through (with a warning comment)
         return f"/* Unsupported operation: {op} */";
 
+    def generate_print_histogram(self, state_index, max_value_per_condition=10):
+        code = []
+
+        var_names = list(state_index.keys())
+        var_names_c = ', '.join(f'"{name}"' for name in var_names)
+        code.append(f'const char* var_names[] = {{{var_names_c}}};')
+        code.append('')
+
+        code.append('void print_histogram() {')
+        code.append('    int total_states = 0;')
+        code.append('')
+
+        total_conditions = len(var_names)
+        for i in range(total_conditions):
+            indent = '    ' * (i+1)
+            code.append(f'{indent}for (int i{i} = 0; i{i} < {max_value_per_condition}; i{i}++) {{')
+
+        indent = '    ' * (total_conditions + 1)
+        index_string = ''.join(f'[i{i}]' for i in range(total_conditions))
+        code.append(f'{indent}if (states{index_string} > 0) total_states++;')
+
+        for i in reversed(range(total_conditions)):
+            indent = '    ' * (i+1)
+            code.append(f'{indent}}}')
+
+        code.append('')
+
+        code.append('    printf("Histogram (%d states)\\n", total_states);')
+        code.append('')
+
+        for i in range(total_conditions):
+            indent = '    ' * (i+1)
+            code.append(f'{indent}for (int i{i} = 0; i{i} < {max_value_per_condition}; i{i}++) {{')
+
+        indent = '    ' * (total_conditions + 1)
+        code.append(f'{indent}int count = states{index_string};')
+        code.append(f'{indent}if (count > 0) {{')
+        code.append(f'{indent}    printf("%-8d ", count);')
+        code.append(f'{indent}    if (&states{index_string} == expected_state_p) printf("*");')
+        code.append(f'{indent}    else printf(":");')
+        code.append(f'{indent}    printf(">");')
+        code.append(f'{indent}    int idx_vals[] = {{{", ".join(f"i{i}" for i in range(total_conditions))}}};')
+
+        code.append(f'{indent}    for (int k = 0; k < {total_conditions}; k++) {{')
+        code.append(f'{indent}        const char* name = var_names[k];')
+        code.append(f'{indent}        if (name[0] == \'p\') {{')
+        code.append(f'{indent}            int proc_id, reg_id;')
+        code.append(f'{indent}            sscanf(name, "p%d_r%d", &proc_id, &reg_id);')
+        code.append(f'{indent}            printf("%d:r%d=%d; ", proc_id, reg_id, idx_vals[k]);')
+        code.append(f'{indent}        }} else if (strncmp(name, "var_", 4) == 0) {{')
+        code.append(f'{indent}            printf("%s=%d; ", name+4, idx_vals[k]);')
+        code.append(f'{indent}        }} else {{')
+        code.append(f'{indent}            printf("%s=%d; ", name, idx_vals[k]);')
+        code.append(f'{indent}        }}')
+        code.append(f'{indent}    }}')
+        code.append(f'{indent}    printf("\\n");')
+        code.append(f'{indent}}}')
+
+        for i in reversed(range(total_conditions)):
+            indent = '    ' * (i+1)
+            code.append(f'{indent}}}')
+
+        code.append('}')
+        code.append('')
+        return code
+
     def generate_user_c(self) -> str:
         """Generate user-space C code"""
         num_processes = len(self.parser.processes)
@@ -272,6 +338,15 @@ class BPFGenerator:
         code.append(f"#define TEST_NAME_PRINT \"{self.parser.test_name}\"")
         clause = self.parser.exists_clause.replace('\\', '\\\\')
         code.append(f"#define EXISTS_CLAUSE \"{clause}\"")
+
+
+        num_proc_conditions = len(self.parser.conditions)
+        num_var_conditions = len(getattr(self.parser, 'variable_conditions', []))
+        total_conditions = num_proc_conditions + num_var_conditions
+
+        code.append("int states" + ("[10]" * total_conditions) + " = {0};")
+        code.append("int *expected_state_p = NULL;")
+
         code.append("static void check_cond (STRUCT_NAME(TEST_NAME) *skel,")
         code.append("\t\t\tint *matches, int *non_matches, int c) {")
 
@@ -300,6 +375,8 @@ class BPFGenerator:
             code.append("\t// Check if this iteration matches the exists clause")
             conditions = []
 
+            state_index = {}
+
             # Add register conditions
             for proc in self.parser.processes:
                 proc_id = proc['id']
@@ -312,19 +389,28 @@ class BPFGenerator:
                             break
                     if expected_value is not None:
                         conditions.append(f"p{proc_id}_{reg} == {expected_value}")
+                        state_index[f"p{proc_id}_{reg}"] = expected_value
 
             # Add variable conditions
             for var, expected_value in getattr(self.parser, 'variable_conditions', []):
                     conditions.append(f"var_{var} == {expected_value}")
+                    state_index[f"var_{var}"] = expected_value
+
+            ordered_variables = list(state_index.keys())
+            index_string = "][".join(ordered_variables)
+            code_line = f"\tstates[{index_string}]++;"
+            code.append(code_line)
 
             if conditions:
                 code.append("\tif (" + " && ".join(conditions) + ") {")
                 code.append("\t\t\t*matches += 1;")
+                code.append(f"\t\t\texpected_state_p = &states[{index_string}];")
                 code.append("\t} else {")
                 code.append("\t\t\t*non_matches += 1;")
                 code.append("\t}")
 
         code.append("}")
+        code.extend(self.generate_print_histogram(state_index))
         code.append(footer_content)
         return "\n".join(code)
 
