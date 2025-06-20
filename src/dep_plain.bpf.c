@@ -1,4 +1,4 @@
-/* Auto-generated from MP+poonceonces.litmus */
+/* Auto-generated from dep+plain.litmus */
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
@@ -71,31 +71,23 @@ int barrier_wait(unsigned int id, unsigned int i)
 }
 
 /*
- * * Result: Sometimes
+ * * Result: Never
  * *
- * * Can the counter-intuitive message-passing outcome be prevented with
- * * no ordering at all?
- * buf, 1);
- * WRITE_ONCE(*flag, 1);
- * }
- * 
- * P1(int *buf, int *flag)
- * {
- * int r0;
- * int r1;
- * 
- * r0 = READ_ONCE(*flag);
- * r1 = READ_ONCE(*buf);
- * }
- * 
- * exists (1:r0=1 /\ 1:r1=0) (* Bad outcome.
+ * * This litmus test demonstrates that in LKMM, plain accesses
+ * * carry dependencies much like accesses to registers:
+ * * The data stored to *z1 and *z2 by P0() originates from P0()'s
+ * * READ_ONCE(), and therefore using that data to compute the
+ * * conditional of P0()'s if-statement creates a control dependency
+ * * from that READ_ONCE() to P0()'s WRITE_ONCE().
  */
 
 struct {
-    volatile int buf[1000];
-    volatile int flag[1000];
-    volatile int r1[1000];  // For P1_r0
-    volatile int r2[1000];  // For P1_r1
+    volatile int x[1000];
+    volatile int y[1000];
+    volatile int z1[1000];
+    volatile int z2[1000];
+    volatile int r1[1000];  // For P0_r0
+    volatile int r2[1000];  // For P1_r0
 } shared;
 
 // Program for P0
@@ -105,8 +97,11 @@ int handle_tp1(void *ctx)
 	smp_mb();
 	for (int i=0; i<1000; i++) {
 		barrier_wait(0, i);
-		WRITE_ONCE(shared.buf[i], 1);
-		WRITE_ONCE(shared.flag[i], 1);
+		shared.r1[i] = READ_ONCE(shared.x[i]);
+		shared.z1[i] = shared.r1[i];
+		shared.z2[i] = shared.z1[i];
+		if (shared.z2[i] == 1)
+		WRITE_ONCE(shared.y[i], 1);
 	}
 	smp_mb();
 	return 0;
@@ -119,8 +114,8 @@ int handle_tp2(void *ctx)
 	smp_mb();
 	for (int i=0; i<1000; i++) {
 		barrier_wait(1, i);
-		shared.r1[i] = READ_ONCE(shared.flag[i]);
-		shared.r2[i] = READ_ONCE(shared.buf[i]);
+		shared.r2[i] = smp_load_acquire(&shared.y[i]);
+		smp_store_release(&shared.x[i], shared.r2[i]);
 	}
 	smp_mb();
 	return 0;

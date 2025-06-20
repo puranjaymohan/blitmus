@@ -39,9 +39,7 @@ class LitmusParser:
             for block in comment_blocks:
                 self.comments.append(block.strip('(*').strip('*)').strip())
 
-            # Extract processes
-            process_blocks = re.findall(r'P\d+\s*\([^)]*\)[^{]*\{[^}]*\}', content, re.DOTALL)
-
+            process_blocks = re.findall(r'P\d+\s*\([^)]*\)\s*\{[^}]*\}', content, re.DOTALL)
             for block in process_blocks:
                 process = {}
 
@@ -62,14 +60,16 @@ class LitmusParser:
                 body_match = re.search(r'\{([^}]*)\}', block, re.DOTALL)
                 if body_match:
                     body = body_match.group(1).strip()
-                    process['body'] = [line.strip() for line in body.split(';') if line.strip()]
+                    process['body'] = [line.strip() for line in body.splitlines() if line.strip()]
 
                     # Extract register declarations
-                    reg_decls = [line for line in process['body'] if re.match(r'^\s*int\s+r\d+\s*$', line)]
+                    reg_decls = [line for line in process['body'] if re.match(r'^\s*int\s+r\d+\s*;$', line)]
                     process['registers'] = [re.search(r'int\s+(r\d+)', decl).group(1) for decl in reg_decls]
 
                     # Extract operations (excluding register declarations)
-                    process['operations'] = [line for line in process['body'] if not re.match(r'^\s*int\s+r\d+\s*$', line)]
+                    process['operations'] = [line for line in
+                                             process['body'] if not
+                                             re.match(r'^\s*int\s+r\d+\s*;$', line)]
 
                     # Track registers for this process
                     self.registers[process['id']] = process['registers']
@@ -229,6 +229,40 @@ class BPFGenerator:
 
     def _convert_operation(self, op: str, proc_id: int) -> str:
         """Convert a litmus test operation to BPF code"""
+
+        # Handle memory-to-memory copy: *var1 = *var2;
+        memcpy_match = re.search(r'^\*(\w+)\s*=\s*\*(\w+);?$', op)
+        if memcpy_match:
+            dst, src = memcpy_match.groups()
+            return f"shared.{dst}[i] = shared.{src}[i];"
+
+        # Handle memory constant store: *var = constant;
+        mem_const_store_match = re.search(r'^\*(\w+)\s*=\s*(\d+);?$', op)
+        if mem_const_store_match:
+            var, val = mem_const_store_match.groups()
+            return f"shared.{var}[i] = {val};"
+
+        # Handle plain store: *var = reg;
+        plain_store_match = re.search(r'^\*(\w+)\s*=\s*(\w+);?$', op)
+        if plain_store_match:
+            var, reg = plain_store_match.groups()
+            reg_num = self.reg_mapping.get((proc_id, reg), 0)
+            return f"shared.{var}[i] = shared.r{reg_num}[i];"
+
+        # Handle plain load: reg = *var;
+        plain_load_match = re.search(r'^(\w+)\s*=\s*\*(\w+);?$', op)
+        if plain_load_match:
+            reg, var = plain_load_match.groups()
+            reg_num = self.reg_mapping.get((proc_id, reg), 0)
+            return f"shared.r{reg_num}[i] = shared.{var}[i];"
+
+        # Handle constant assignment: reg = constant;
+        const_assign_match = re.search(r'^(\w+)\s*=\s*(\d+);?$', op)
+        if const_assign_match:
+            reg, val = const_assign_match.groups()
+            reg_num = self.reg_mapping.get((proc_id, reg), 0)
+            return f"shared.r{reg_num}[i] = {val};"
+
         # Handle WRITE_ONCE
         write_match = re.search(r'WRITE_ONCE\(\*(\w+),\s*(\d+)\)', op)
         if write_match:
@@ -244,6 +278,25 @@ class BPFGenerator:
             # Use the sequential register mapping
             reg_num = self.reg_mapping.get((proc_id, reg), 0)
             return f"shared.r{reg_num}[i] = READ_ONCE(shared.{var}[i]);"
+
+        # Handle: if (*var == val) [memory condition]
+        if_mem_match = re.search(r'if\s*\(\s*\*(\w+)\s*==\s*(\d+)\s*\)\s*(\{)?', op)
+        if if_mem_match:
+            var, val, has_brace = if_mem_match.groups()
+            code = f"if (shared.{var}[i] == {val})"
+            if has_brace:
+                code += " {"
+            return code
+
+        # Handle: if (reg == val) [register condition]
+        if_reg_match = re.search(r'if\s*\(\s*(\w+)\s*==\s*(\d+)\s*\)\s*(\{)?', op)
+        if if_reg_match:
+            reg, val, has_brace = if_reg_match.groups()
+            reg_num = self.reg_mapping.get((proc_id, reg), 0)
+            code = f"if (shared.r{reg_num}[i] == {val})"
+            if has_brace:
+                code += " {"
+            return code
 
         # Handle smp_mb
         smp_mb_match = re.match(r'\s*smp_mb\(\s*\)\s*;?', op)
@@ -266,6 +319,10 @@ class BPFGenerator:
             reg, var = load_acquire_match.groups()
             reg_num = self.reg_mapping.get((proc_id, reg), 0)
             return f"shared.r{reg_num}[i] = smp_load_acquire(&shared.{var}[i]);"
+
+        # Handle closing brace
+        if op.strip() == "}":
+            return "}"
 
         # Default case - pass through (with a warning comment)
         return f"/* Unsupported operation: {op} */";
@@ -372,15 +429,10 @@ class BPFGenerator:
         if self.parser.conditions or getattr(self.parser, 'variable_conditions', []):
             # Generate code to get register values
             code.append("\t// Get the values for this iteration")
-            reg_counter = 1
-            reg_vars = []
-            for proc in self.parser.processes:
-                proc_id = proc['id']
-                for reg in proc.get('registers', []):
-                    var_name = f"p{proc_id}_{reg}"
-                    code.append(f"\tint {var_name} = skel->bss->shared.r{reg_counter}[c];")
-                    reg_vars.append(var_name)
-                    reg_counter += 1
+            for proc_id, reg, expected_value in getattr(self.parser, 'conditions', []):
+                reg_counter = self.reg_mapping[(proc_id, reg)]
+                var_name = f"p{proc_id}_{reg}"
+                code.append(f"\tint {var_name} = skel->bss->shared.r{reg_counter}[c];")
 
             # Generate code to get variable values (for variable conditions)
             var_vars = []
@@ -396,18 +448,10 @@ class BPFGenerator:
             state_index = {}
 
             # Add register conditions
-            for proc in self.parser.processes:
-                proc_id = proc['id']
-                for reg in proc.get('registers', []):
-                    # Find the expected value for this register
-                    expected_value = None
-                    for cond_proc_id, cond_reg, cond_value in self.parser.conditions:
-                        if cond_proc_id == proc_id and cond_reg == reg:
-                            expected_value = cond_value
-                            break
-                    if expected_value is not None:
-                        conditions.append(f"p{proc_id}_{reg} == {expected_value}")
-                        state_index[f"p{proc_id}_{reg}"] = expected_value
+            for proc_id, reg, expected_value in getattr(self.parser, 'conditions', []):
+                conditions.append(f"p{proc_id}_{reg} == {expected_value}")
+                state_index[f"p{proc_id}_{reg}"] = expected_value
+
 
             # Add variable conditions
             for var, expected_value in getattr(self.parser, 'variable_conditions', []):

@@ -80,7 +80,7 @@ int barrier_wait(unsigned int id, unsigned int i)
  * smp_store_release(flag, 1);
  * }
  * 
- * P1(int *buf, int *flag) // Consumer
+ * P1(int *buf, int *flag)
  * {
  * int r0;
  * int r1;

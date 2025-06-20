@@ -21,7 +21,7 @@ INCLUDES := -I$(OUTPUT) -Isrc/libbpf/include/uapi -I$(dir $(VMLINUX))
 CFLAGS := -g -Wall
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS) -lrt -ldl -lpthread -lm
 
-APPS = iriw_poonceonces_onceonce r_poonceonces sb_poonceonces sb_fencembonceonces mp_pooncerelease_poacquireonce mp_poonceonces
+APPS = iriw_poonceonces_onceonce r_poonceonces sb_poonceonces sb_fencembonceonces mp_pooncerelease_poacquireonce mp_poonceonces dep_plain
 
 # Get Clang's default includes on this system. We'll explicitly add these dirs
 # to the includes list when compiling with `-target bpf` because otherwise some
@@ -62,6 +62,15 @@ all: $(APPS)
 clean:
 	$(call msg,CLEAN)
 	$(Q)rm -rf $(OUTPUT) $(APPS)
+
+.PHONY: regen_litmus
+
+LITMUS_FILES := $(wildcard litmus_tests/*.litmus)
+
+regen_litmus:
+	@for file in $(LITMUS_FILES); do \
+		./litmus2bpf.py -v $$file; \
+	done
 
 $(OUTPUT) $(OUTPUT)/libbpf $(BPFTOOL_OUTPUT):
 	$(call msg,MKDIR,$@)

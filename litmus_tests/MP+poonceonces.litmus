@@ -9,13 +9,13 @@ C MP+poonceonces
 
 {}
 
-P0(int *buf, int *flag) // Producer
+P0(int *buf, int *flag)
 {
 	WRITE_ONCE(*buf, 1);
 	WRITE_ONCE(*flag, 1);
 }
 
-P1(int *buf, int *flag) // Consumer
+P1(int *buf, int *flag)
 {
 	int r0;
 	int r1;
