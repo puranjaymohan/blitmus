@@ -21,7 +21,7 @@ INCLUDES := -I$(OUTPUT) -Isrc/libbpf/include/uapi -I$(dir $(VMLINUX))
 CFLAGS := -g -Wall
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS) -lrt -ldl -lpthread -lm
 
-APPS = iriw_poonceonces_onceonce r_poonceonces sb_poonceonces sb_fencembonceonces mp_pooncerelease_poacquireonce
+APPS = iriw_poonceonces_onceonce r_poonceonces sb_poonceonces sb_fencembonceonces mp_pooncerelease_poacquireonce mp_poonceonces
 
 # Get Clang's default includes on this system. We'll explicitly add these dirs
 # to the includes list when compiling with `-target bpf` because otherwise some
