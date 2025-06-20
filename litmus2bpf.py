@@ -40,7 +40,7 @@ class LitmusParser:
                 self.comments.append(block.strip('(*').strip('*)').strip())
 
             # Extract processes
-            process_blocks = re.findall(r'P\d+\s*\([^)]*\)\s*\{[^}]*\}', content, re.DOTALL)
+            process_blocks = re.findall(r'P\d+\s*\([^)]*\)[^{]*\{[^}]*\}', content, re.DOTALL)
 
             for block in process_blocks:
                 process = {}
@@ -245,9 +245,27 @@ class BPFGenerator:
             reg_num = self.reg_mapping.get((proc_id, reg), 0)
             return f"shared.r{reg_num}[i] = READ_ONCE(shared.{var}[i]);"
 
+        # Handle smp_mb
         smp_mb_match = re.match(r'\s*smp_mb\(\s*\)\s*;?', op)
         if smp_mb_match:
             return "smp_mb();"
+
+        # Handle smp_store_release
+        store_release_match = re.search(r'smp_store_release\(\s*(\w+)\s*,\s*(\w+)\s*\)', op)
+        if store_release_match:
+            var, val = store_release_match.groups()
+            if val.isdigit():
+                return f"smp_store_release(&shared.{var}[i], {val});"
+            else:
+                reg_num = self.reg_mapping.get((proc_id, val), 0)
+                return f"smp_store_release(&shared.{var}[i], shared.r{reg_num}[i]);"
+
+        # Handle smp_load_acquire
+        load_acquire_match = re.search(r'(\w+)\s*=\s*smp_load_acquire\(\s*(\w+)\s*\)', op)
+        if load_acquire_match:
+            reg, var = load_acquire_match.groups()
+            reg_num = self.reg_mapping.get((proc_id, reg), 0)
+            return f"shared.r{reg_num}[i] = smp_load_acquire(&shared.{var}[i]);"
 
         # Default case - pass through (with a warning comment)
         return f"/* Unsupported operation: {op} */";

@@ -5,33 +5,69 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-volatile __u64 flag[1000] = {0};
+volatile __u64 sync_flag[1000] = {0};
+
+/*
+ * __unqual_scalar_typeof(x) - Declare an unqualified scalar type, leaving
+ *			       non-scalar types unchanged.
+ */
+/*
+ * Prefer C11 _Generic for better compile-times and simpler code. Note: 'char'
+ * is not type-compatible with 'signed char', and we define a separate case.
+ */
+
+#define __scalar_type_to_expr_cases(type)				\
+		unsigned type:	(unsigned type)0,			\
+		signed type:	(signed type)0
+
+#define __unqual_scalar_typeof(x) typeof(				\
+		_Generic((x),						\
+			 char:	(char)0,				\
+			 __scalar_type_to_expr_cases(char),		\
+			 __scalar_type_to_expr_cases(short),		\
+			 __scalar_type_to_expr_cases(int),		\
+			 __scalar_type_to_expr_cases(long),		\
+			 __scalar_type_to_expr_cases(long long),	\
+			 default: (x)))
 
 #define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
 
 #define WRITE_ONCE(x, val) ((*(volatile typeof(x) *)&(x)) = (val))
 
-#define smp_mb() \
-        ({ \
-                volatile __u64 __val = 1; \
-		__val = __sync_fetch_and_add(&__val, 10); \
+#define smp_mb()						\
+        ({							\
+                volatile __u64 __val = 1;			\
+		__val = __sync_fetch_and_add(&__val, 10);	\
         })
+
+#define smp_load_acquire(p)					\
+	({							\
+		__unqual_scalar_typeof(*p) __val;		\
+		__atomic_load(p, &__val, __ATOMIC_ACQUIRE);	\
+		__val;						\
+	})
+
+#define smp_store_release(p, v)					\
+	({							\
+		__unqual_scalar_typeof(*p) __val = (v);		\
+		__atomic_store(p, &__val, __ATOMIC_RELEASE);	\
+	})
 
 int barrier_wait(unsigned int id, unsigned int i)
 {
- if (i >= 1000)
-         return 0;
- if ((i % 2) == id) {
-    WRITE_ONCE(flag[i], 1);
-    smp_mb();
-  } else {
-    #pragma unroll
-    for (int ii=0; ii<256; ii++) {
-      if (READ_ONCE(flag[i]) != 0) return 0;
-    }
-  }
+	if (i >= 1000)
+		return 0;
 
- return 0;
+	if ((i % 2) == id) {
+		WRITE_ONCE(sync_flag[i], 1);
+		smp_mb();
+	} else {
+		#pragma unroll
+		for (int ii=0; ii<256; ii++) {
+			if (READ_ONCE(sync_flag[i]) != 0) return 0;
+		}
+	}
+	return 0;
 }
 
 /*

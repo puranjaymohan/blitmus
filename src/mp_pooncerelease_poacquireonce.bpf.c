@@ -1,4 +1,4 @@
-/* Auto-generated from IRIW+poonceonces+OnceOnce.litmus */
+/* Auto-generated from MP+pooncerelease+poacquireonce.litmus */
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
@@ -71,22 +71,32 @@ int barrier_wait(unsigned int id, unsigned int i)
 }
 
 /*
- * * Result: Sometimes
+ * * Result: Never
  * *
- * * Test of independent reads from independent writes with nothing
- * * between each pairs of reads.  In other words, is anything at all
- * * needed to cause two different reading processes to agree on the order
- * * of a pair of writes, where each write is to a different variable by a
- * * different process?
+ * * This litmus test demonstrates that smp_store_release() and
+ * * smp_load_acquire() provide sufficient ordering for the message-passing
+ * * pattern.
+ * buf, 1);
+ * smp_store_release(flag, 1);
+ * }
+ * 
+ * P1(int *buf, int *flag) // Consumer
+ * {
+ * int r0;
+ * int r1;
+ * 
+ * r0 = smp_load_acquire(flag);
+ * r1 = READ_ONCE(*buf);
+ * }
+ * 
+ * exists (1:r0=1 /\ 1:r1=0) (* Bad outcome.
  */
 
 struct {
-    volatile int x[1000];
-    volatile int y[1000];
+    volatile int buf[1000];
+    volatile int flag[1000];
     volatile int r1[1000];  // For P1_r0
     volatile int r2[1000];  // For P1_r1
-    volatile int r3[1000];  // For P3_r0
-    volatile int r4[1000];  // For P3_r1
 } shared;
 
 // Program for P0
@@ -96,7 +106,8 @@ int handle_tp1(void *ctx)
 	smp_mb();
 	for (int i=0; i<1000; i++) {
 		barrier_wait(0, i);
-		WRITE_ONCE(shared.x[i], 1);
+		WRITE_ONCE(shared.buf[i], 1);
+		smp_store_release(&shared.flag[i], 1);
 	}
 	smp_mb();
 	return 0;
@@ -109,35 +120,8 @@ int handle_tp2(void *ctx)
 	smp_mb();
 	for (int i=0; i<1000; i++) {
 		barrier_wait(1, i);
-		shared.r1[i] = READ_ONCE(shared.x[i]);
-		shared.r2[i] = READ_ONCE(shared.y[i]);
-	}
-	smp_mb();
-	return 0;
-}
-
-// Program for P2
-SEC("raw_tp/test_prog3")
-int handle_tp3(void *ctx)
-{
-	smp_mb();
-	for (int i=0; i<1000; i++) {
-		barrier_wait(2, i);
-		WRITE_ONCE(shared.y[i], 1);
-	}
-	smp_mb();
-	return 0;
-}
-
-// Program for P3
-SEC("raw_tp/test_prog4")
-int handle_tp4(void *ctx)
-{
-	smp_mb();
-	for (int i=0; i<1000; i++) {
-		barrier_wait(3, i);
-		shared.r3[i] = READ_ONCE(shared.y[i]);
-		shared.r4[i] = READ_ONCE(shared.x[i]);
+		shared.r1[i] = smp_load_acquire(&shared.flag[i]);
+		shared.r2[i] = READ_ONCE(shared.buf[i]);
 	}
 	smp_mb();
 	return 0;
