@@ -21,7 +21,7 @@ INCLUDES := -I$(OUTPUT) -Isrc/libbpf/include/uapi -I$(dir $(VMLINUX))
 CFLAGS := -g -Wall
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS) -lrt -ldl -lpthread -lm
 
-APPS = iriw_poonceonces_onceonce r_poonceonces sb_poonceonces sb_fencembonceonces mp_pooncerelease_poacquireonce mp_poonceonces dep_plain wrc_poonceonces_once wrc_pooncerelease_fencermbonceonce_once isa2_pooncerelease_poacquirerelease_poacquireonce isa2_poonceonces lb_poonceonces lb_fencembonceonce_ctrlonceonce lb_poacquireonce_pooncerelease
+APPS = iriw_poonceonces_onceonce r_poonceonces sb_poonceonces sb_fencembonceonces mp_pooncerelease_poacquireonce mp_poonceonces dep_plain wrc_poonceonces_once wrc_pooncerelease_fencermbonceonce_once isa2_pooncerelease_poacquirerelease_poacquireonce isa2_poonceonces lb_poonceonces lb_fencembonceonce_ctrlonceonce lb_poacquireonce_pooncerelease corr_poonceonce_once corw_poonceonce_once cowr_poonceonce_once coww_poonceonce iriw_fencembonceonces_onceonce r_fencembonceonces s_fencewmbonceonce_poacquireonce s_poonceonces z6_0_pooncerelease_poacquirerelease_fencembonceonce sb_rfionceonce_poonceonces
 
 # Get Clang's default includes on this system. We'll explicitly add these dirs
 # to the includes list when compiling with `-target bpf` because otherwise some
