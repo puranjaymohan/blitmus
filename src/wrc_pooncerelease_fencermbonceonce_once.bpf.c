@@ -123,7 +123,7 @@ int handle_tp3(void *ctx)
 	for (int i=0; i<1000; i++) {
 		barrier_wait(2, i);
 		shared.r2[i] = READ_ONCE(shared.y[i]);
-		/* Unsupported operation: smp_rmb(); */
+		smp_mb();
 		shared.r3[i] = READ_ONCE(shared.x[i]);
 	}
 	smp_mb();
