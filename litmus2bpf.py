@@ -22,6 +22,7 @@ class LitmusParser:
         self.registers = {}
         self.exists_clause = ""
         self.comments = []
+        self.result_type = ""
 
     def parse(self) -> bool:
         """Parse the litmus test file"""
@@ -34,10 +35,16 @@ class LitmusParser:
             if name_match:
                 self.test_name = name_match.group(1)
 
-            # Extract comments
+            # Extract comments and look for Result field
             comment_blocks = re.findall(r'\(\*.*?\*\)', content, re.DOTALL)
             for block in comment_blocks:
-                self.comments.append(block.strip('(*').strip('*)').strip())
+                comment_text = block.strip('(*').strip('*)').strip()
+                self.comments.append(comment_text)
+                
+                # Look for Result: field in comments (case-sensitive)
+                result_match = re.search(r'Result:\s*(\w+)', comment_text)
+                if result_match:
+                    self.result_type = result_match.group(1)
 
             process_blocks = re.findall(r'P\d+\s*\([^)]*\)\s*\{[^}]*\}', content, re.DOTALL)
             for block in process_blocks:
@@ -128,6 +135,8 @@ class LitmusParser:
         """Return a summary of the parsed litmus test"""
         summary = []
         summary.append(f"Test Name: {self.test_name}")
+        if self.result_type:
+            summary.append(f"Result Type: {self.result_type}")
         summary.append(f"Variables: {', '.join(sorted(self.variables))}")
         summary.append(f"Processes: {len(self.processes)}")
 
@@ -426,6 +435,12 @@ class BPFGenerator:
 
         code.append("unsigned int states" + ("[10]" * total_conditions) + " = {0};")
         code.append("unsigned int *expected_state_p = NULL;")
+        
+        # Add expected variable based on Result field
+        if self.parser.result_type in ["Sometimes", "Always"]:
+            code.append("bool expected = true;")
+        else:
+            code.append("bool expected = false;")
 
         code.append("static void check_cond (STRUCT_NAME(TEST_NAME) *skel,")
         code.append("\t\t\tint *matches, int *non_matches, int c) {")

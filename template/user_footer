@@ -239,7 +239,9 @@ int main(int argc, char **argv)
         // Print timestamp
         printf("%s\n", time_str);
 
+	err = !!matches && !expected;
+
 cleanup:
         BPF_DESTROY(TEST_NAME)(skel);
-        return -err;
+        return err;
 }

@@ -39,6 +39,7 @@
 #define EXISTS_CLAUSE "1:r0=1 /\\ 1:r1=0 /\\ 3:r0=1 /\\ 3:r1=0"
 unsigned int states[10][10][10][10] = {0};
 unsigned int *expected_state_p = NULL;
+bool expected = false;
 static void check_cond (STRUCT_NAME(TEST_NAME) *skel,
 			int *matches, int *non_matches, int c) {
 	// Get the values for this iteration
@@ -344,7 +345,9 @@ int main(int argc, char **argv)
         // Print timestamp
         printf("%s\n", time_str);
 
+	err = !!matches && !expected;
+
 cleanup:
         BPF_DESTROY(TEST_NAME)(skel);
-        return -err;
+        return err;
 }
