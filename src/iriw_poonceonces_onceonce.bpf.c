@@ -113,10 +113,10 @@ int num_threads = 4;
 SEC("raw_tp/test_prog1")
 int handle_tp1(void *ctx)
 {
-__u32 local_sense = 0;
-int i;
+	__u32 local_sense = 0;
+	int i;
 
-bpf_sense_barrier(&local_sense, num_threads);
+	bpf_sense_barrier(&local_sense, num_threads);
 	smp_mb();
 	bpf_for (i, 0, 10000) {
 		barrier_wait(0, i);
@@ -130,10 +130,10 @@ bpf_sense_barrier(&local_sense, num_threads);
 SEC("raw_tp/test_prog2")
 int handle_tp2(void *ctx)
 {
-__u32 local_sense = 0;
-int i;
+	__u32 local_sense = 0;
+	int i;
 
-bpf_sense_barrier(&local_sense, num_threads);
+	bpf_sense_barrier(&local_sense, num_threads);
 	smp_mb();
 	bpf_for (i, 0, 10000) {
 		barrier_wait(1, i);
@@ -148,10 +148,10 @@ bpf_sense_barrier(&local_sense, num_threads);
 SEC("raw_tp/test_prog3")
 int handle_tp3(void *ctx)
 {
-__u32 local_sense = 0;
-int i;
+	__u32 local_sense = 0;
+	int i;
 
-bpf_sense_barrier(&local_sense, num_threads);
+	bpf_sense_barrier(&local_sense, num_threads);
 	smp_mb();
 	bpf_for (i, 0, 10000) {
 		barrier_wait(2, i);
@@ -165,10 +165,10 @@ bpf_sense_barrier(&local_sense, num_threads);
 SEC("raw_tp/test_prog4")
 int handle_tp4(void *ctx)
 {
-__u32 local_sense = 0;
-int i;
+	__u32 local_sense = 0;
+	int i;
 
-bpf_sense_barrier(&local_sense, num_threads);
+	bpf_sense_barrier(&local_sense, num_threads);
 	smp_mb();
 	bpf_for (i, 0, 10000) {
 		barrier_wait(3, i);
