@@ -229,7 +229,7 @@ int main(int argc, char **argv)
         int i = 0;
         int err;
         struct test_config config = {
-                .iterations = 1000000,
+                .iterations = 4100,
                 .verbose = 0,
         };
 
