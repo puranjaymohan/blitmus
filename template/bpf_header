@@ -4,7 +4,9 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-volatile __u64 sync_flag[1000] = {0};
+volatile __u64 sync_flag[10000] = {0};
+volatile __u32 count;
+volatile __u32 sense;
 
 /*
  * __unqual_scalar_typeof(x) - Declare an unqualified scalar type, leaving
@@ -54,17 +56,34 @@ volatile __u64 sync_flag[1000] = {0};
 
 int barrier_wait(unsigned int id, unsigned int i)
 {
-	if (i >= 1000)
+	if (i >= 10000)
 		return 0;
 
 	if ((i % 2) == id) {
 		WRITE_ONCE(sync_flag[i], 1);
 		smp_mb();
 	} else {
-		#pragma unroll
 		for (int ii=0; ii<256; ii++) {
 			if (READ_ONCE(sync_flag[i]) != 0) return 0;
 		}
 	}
 	return 0;
+}
+
+static void bpf_sense_barrier(__u32 *local_sense, int t)
+{
+	*local_sense = !(*local_sense);
+
+	__sync_fetch_and_add(&count, 1);
+
+	if (__sync_fetch_and_add(&count, 0) == t) {
+		// Last thread resets count and flips sense
+		count = 0;
+		sense = *local_sense;
+	} else {
+		for (int i = 0; i < 200; i++) {
+			if (sense == *local_sense)
+				break;
+		}
+	}
 }

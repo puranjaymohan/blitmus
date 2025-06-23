@@ -37,8 +37,8 @@
 #define TEST_NAME sb_fencembonceonces
 #define TEST_NAME_PRINT "SB+fencembonceonces"
 #define EXISTS_CLAUSE "0:r0=0 /\\ 1:r0=0"
-int states[10][10] = {0};
-int *expected_state_p = NULL;
+unsigned int states[10][10] = {0};
+unsigned int *expected_state_p = NULL;
 static void check_cond (STRUCT_NAME(TEST_NAME) *skel,
 			int *matches, int *non_matches, int c) {
 	// Get the values for this iteration
@@ -283,7 +283,7 @@ int main(int argc, char **argv)
                         pthread_join(t[thread], NULL);
 
                 // Check results
-                for (int c = 0; c < 1000; c++) {
+                for (int c = 0; c < 10000; c++) {
                         // Get the values for this iteration
                         check_cond(skel, &matches, &non_matches, c);
                 }

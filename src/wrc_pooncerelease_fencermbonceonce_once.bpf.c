@@ -5,7 +5,9 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-volatile __u64 sync_flag[1000] = {0};
+volatile __u64 sync_flag[10000] = {0};
+volatile __u32 count;
+volatile __u32 sense;
 
 /*
  * __unqual_scalar_typeof(x) - Declare an unqualified scalar type, leaving
@@ -55,19 +57,36 @@ volatile __u64 sync_flag[1000] = {0};
 
 int barrier_wait(unsigned int id, unsigned int i)
 {
-	if (i >= 1000)
+	if (i >= 10000)
 		return 0;
 
 	if ((i % 2) == id) {
 		WRITE_ONCE(sync_flag[i], 1);
 		smp_mb();
 	} else {
-		#pragma unroll
 		for (int ii=0; ii<256; ii++) {
 			if (READ_ONCE(sync_flag[i]) != 0) return 0;
 		}
 	}
 	return 0;
+}
+
+static void bpf_sense_barrier(__u32 *local_sense, int t)
+{
+	*local_sense = !(*local_sense);
+
+	__sync_fetch_and_add(&count, 1);
+
+	if (__sync_fetch_and_add(&count, 0) == t) {
+		// Last thread resets count and flips sense
+		count = 0;
+		sense = *local_sense;
+	} else {
+		for (int i = 0; i < 200; i++) {
+			if (sense == *local_sense)
+				break;
+		}
+	}
 }
 
 /*
@@ -81,19 +100,24 @@ int barrier_wait(unsigned int id, unsigned int i)
  */
 
 struct {
-    volatile int x[1000];
-    volatile int y[1000];
-    volatile int r1[1000];  // For P1_r0
-    volatile int r2[1000];  // For P2_r0
-    volatile int r3[1000];  // For P2_r1
+    volatile int x[10000];
+    volatile int y[10000];
+    volatile int r1[10000];  // For P1_r0
+    volatile int r2[10000];  // For P2_r0
+    volatile int r3[10000];  // For P2_r1
 } shared;
 
+int num_threads = 3;
 // Program for P0
 SEC("raw_tp/test_prog1")
 int handle_tp1(void *ctx)
 {
+__u32 local_sense = 0;
+int i;
+
+bpf_sense_barrier(&local_sense, num_threads);
 	smp_mb();
-	for (int i=0; i<1000; i++) {
+	bpf_for (i, 0, 10000) {
 		barrier_wait(0, i);
 		WRITE_ONCE(shared.x[i], 1);
 	}
@@ -105,8 +129,12 @@ int handle_tp1(void *ctx)
 SEC("raw_tp/test_prog2")
 int handle_tp2(void *ctx)
 {
+__u32 local_sense = 0;
+int i;
+
+bpf_sense_barrier(&local_sense, num_threads);
 	smp_mb();
-	for (int i=0; i<1000; i++) {
+	bpf_for (i, 0, 10000) {
 		barrier_wait(1, i);
 		shared.r1[i] = READ_ONCE(shared.x[i]);
 		smp_store_release(&shared.y[i], 1);
@@ -119,8 +147,12 @@ int handle_tp2(void *ctx)
 SEC("raw_tp/test_prog3")
 int handle_tp3(void *ctx)
 {
+__u32 local_sense = 0;
+int i;
+
+bpf_sense_barrier(&local_sense, num_threads);
 	smp_mb();
-	for (int i=0; i<1000; i++) {
+	bpf_for (i, 0, 10000) {
 		barrier_wait(2, i);
 		shared.r2[i] = READ_ONCE(shared.y[i]);
 		smp_mb();

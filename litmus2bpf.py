@@ -194,14 +194,15 @@ class BPFGenerator:
         # Add shared variables
         code.append("struct {")
         for var in sorted(self.parser.variables):
-            code.append(f"    volatile int {var}[1000];")
+            code.append(f"    volatile int {var}[10000];")
 
         # Add registers for each process - use sequential numbering
         for (proc_id, reg), reg_num in sorted(self.reg_mapping.items(), key=lambda item: item[1]):
-                code.append(f"    volatile int r{reg_num}[1000];  // For P{proc_id}_{reg}")
+                code.append(f"    volatile int r{reg_num}[10000];  // For P{proc_id}_{reg}")
 
         code.append("} shared;")
         code.append("")
+        code.append(f"int num_threads = {len(self.parser.processes)};")
 
         # Generate BPF programs for each process
         for proc in self.parser.processes[:self.max_processes]:
@@ -210,8 +211,12 @@ class BPFGenerator:
             code.append(f"SEC(\"raw_tp/test_prog{proc_id + 1}\")")
             code.append(f"int handle_tp{proc_id + 1}(void *ctx)")
             code.append("{")
+            code.append("__u32 local_sense = 0;")
+            code.append("int i;")
+            code.append("")
+            code.append("bpf_sense_barrier(&local_sense, num_threads);")
             code.append("\tsmp_mb();")
-            code.append("\tfor (int i=0; i<1000; i++) {")
+            code.append("\tbpf_for (i, 0, 10000) {")
             code.append(f"\t\tbarrier_wait({proc_id}, i);")
 
             # Convert operations
@@ -419,8 +424,8 @@ class BPFGenerator:
         num_var_conditions = len(getattr(self.parser, 'variable_conditions', []))
         total_conditions = num_proc_conditions + num_var_conditions
 
-        code.append("int states" + ("[10]" * total_conditions) + " = {0};")
-        code.append("int *expected_state_p = NULL;")
+        code.append("unsigned int states" + ("[10]" * total_conditions) + " = {0};")
+        code.append("unsigned int *expected_state_p = NULL;")
 
         code.append("static void check_cond (STRUCT_NAME(TEST_NAME) *skel,")
         code.append("\t\t\tint *matches, int *non_matches, int c) {")

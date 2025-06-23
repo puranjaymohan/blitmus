@@ -188,7 +188,7 @@ int main(int argc, char **argv)
                         pthread_join(t[thread], NULL);
 
                 // Check results
-                for (int c = 0; c < 1000; c++) {
+                for (int c = 0; c < 10000; c++) {
                         // Get the values for this iteration
                         check_cond(skel, &matches, &non_matches, c);
                 }
