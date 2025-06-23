@@ -340,11 +340,10 @@ int main(int argc, char **argv)
                         check_cond(skel, &matches, &non_matches, c);
                 }
 
-                // Print progress in verbose mode or every 100,000 iterations
-                if (config.verbose && i && i % 10000 == 0) {
+                if (config.verbose && i && i % (config.iterations / 10) == 0) {
                         printf("\rProgress: %d/%d iterations (%.1f%%) - Matches: %d (%.4f%%)",
                                 i, config.iterations, (float)i/config.iterations*100,
-                                matches, (float)matches/(i*1000)*100);
+                                matches, ((float)matches/(i*10000))*100);
                         fflush(stdout);
                 }
         }
