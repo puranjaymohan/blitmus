@@ -173,6 +173,60 @@ void print_usage(const char *prog_name) {
         printf("  -h, --help             Display this help message\n");
 }
 
+void select_random_cpus(int *cpus) {
+        cpu_set_t available;
+        int total_cpus = 0;
+        int threads = THREADS;
+        int *available_cpus;
+        int i;
+
+        CPU_ZERO(&available);
+        if (sched_getaffinity(0, sizeof(available), &available) != 0) {
+                perror("sched_getaffinity");
+                exit(1);
+        }
+
+        /* Count available CPUs */
+        for (i = 0; i < CPU_SETSIZE; i++) {
+                if (CPU_ISSET(i, &available))
+                        total_cpus++;
+        }
+
+        if (threads > total_cpus) {
+                fprintf(stderr, "Not enough CPUs available (requested %d, available %d)\n", threads, total_cpus);
+                exit(1);
+        }
+
+        /* Build list of available CPUs */
+        available_cpus = malloc(sizeof(int) * total_cpus);
+        if (!available_cpus) {
+                perror("malloc");
+                exit(1);
+        }
+
+        int idx = 0;
+        for (i = 0; i < CPU_SETSIZE; i++) {
+                if (CPU_ISSET(i, &available))
+                        available_cpus[idx++] = i;
+        }
+
+        /* Shuffle using Fisher-Yates algorithm */
+        srand(time(NULL));
+        for (i = total_cpus - 1; i > 0; i--) {
+                int j = rand() % (i + 1);
+                int tmp = available_cpus[i];
+                available_cpus[i] = available_cpus[j];
+                available_cpus[j] = tmp;
+        }
+
+        /* Select first THREADS entries */
+        for (i = 0; i < threads; i++) {
+                cpus[i] = available_cpus[i];
+        }
+
+        free(available_cpus);
+}
+
 int main(int argc, char **argv)
 {
         STRUCT_NAME(TEST_NAME) *skel;
@@ -185,9 +239,7 @@ int main(int argc, char **argv)
         };
 
         config.cpus = malloc(sizeof(int) * THREADS);
-
-        for(int i = 0; i < THREADS; i++)
-                config.cpus[i] = i;
+	select_random_cpus(config.cpus);
 
         int matches = 0, non_matches = 0;
 
@@ -261,8 +313,6 @@ int main(int argc, char **argv)
         printf("Starting litmus test with configuration:\n");
         printf("  Test: %s\n", TEST_NAME_PRINT);
         printf("  Iterations: %d\n", config.iterations);
-        for (int thread = 0; thread < THREADS; thread++)
-                printf("  CPU%d (P%d): %d\n", thread, thread,config.cpus[thread]);
 
         clock_gettime(CLOCK_MONOTONIC, &start_time);
 
@@ -277,6 +327,7 @@ int main(int argc, char **argv)
         for (i = 0; i < config.iterations; i++) {
                 reset_state(skel);
 
+		select_random_cpus(config.cpus);
                 for (int thread = 0; thread < THREADS; thread++) {
                         args[thread].cpu = config.cpus[thread];
                         args[thread].prog_fd = prog_fds[thread];
