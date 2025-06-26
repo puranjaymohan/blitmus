@@ -4,7 +4,7 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-volatile __u64 sync_flag[10000] = {0};
+volatile __u64 sync_flag[INTERNAL_ITERATIONS] = {0};
 volatile __u32 count;
 volatile __u32 sense;
 

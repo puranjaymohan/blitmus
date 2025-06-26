@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /* Auto-generated from WRC+poonceonces+Once.litmus */
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 #define _GNU_SOURCE
@@ -37,66 +38,25 @@
 #define TEST_NAME wrc_poonceonces_once
 #define TEST_NAME_PRINT "WRC+poonceonces+Once"
 #define EXISTS_CLAUSE "1:r0=1 /\\ 2:r0=1 /\\ 2:r1=0"
-unsigned long long states[10][10][10] = {0};
-unsigned long long *expected_state_p = NULL;
 bool expected = true;
-static void check_cond (STRUCT_NAME(TEST_NAME) *skel,
-			unsigned long long *matches, unsigned long long *non_matches, int c) {
-	// Get the values for this iteration
-	unsigned long long p1_r0 = skel->bss->shared.r1[c];
-	unsigned long long p2_r0 = skel->bss->shared.r2[c];
-	unsigned long long p2_r1 = skel->bss->shared.r3[c];
-	// Check if this iteration matches the exists clause
-	states[p1_r0][p2_r0][p2_r1]++;
-	if (p1_r0 == 1 && p2_r0 == 1 && p2_r1 == 0) {
-			*matches += 1;
-			expected_state_p = &states[p1_r0][p2_r0][p2_r1];
-	} else {
-			*non_matches += 1;
-	}
+
+static void check_cond (STRUCT_NAME(TEST_NAME) *skel, unsigned long long *matches,
+                        unsigned long long *non_matches, int c) {
+
+	unsigned long long P2_r1 = skel->bss->shared.P2_r1[c];
+	unsigned long long P1_r0 = skel->bss->shared.P1_r0[c];
+	unsigned long long P2_r0 = skel->bss->shared.P2_r0[c];
+
+        // Check if this iteration matches the exists clause
+        if (((P1_r0 == 1) && (P2_r0 == 1) && (P2_r1 == 0))) {
+                *matches += 1;
+        } else {
+                *non_matches += 1;
+        }
 }
-const char* var_names[] = {"p1_r0", "p2_r0", "p2_r1"};
 
-void print_histogram() {
-    int total_states = 0;
-
-    for (int i0 = 0; i0 < 10; i0++) {
-        for (int i1 = 0; i1 < 10; i1++) {
-            for (int i2 = 0; i2 < 10; i2++) {
-                if (states[i0][i1][i2] > 0) total_states++;
-            }
-        }
-    }
-
-    printf("Histogram (%d states)\n", total_states);
-
-    for (int i0 = 0; i0 < 10; i0++) {
-        for (int i1 = 0; i1 < 10; i1++) {
-            for (int i2 = 0; i2 < 10; i2++) {
-                int count = states[i0][i1][i2];
-                if (count > 0) {
-                    printf("%-8d ", count);
-                    if (&states[i0][i1][i2] == expected_state_p) printf("*");
-                    else printf(":");
-                    printf(">");
-                    int idx_vals[] = {i0, i1, i2};
-                    for (int k = 0; k < 3; k++) {
-                        const char* name = var_names[k];
-                        if (name[0] == 'p') {
-                            int proc_id, reg_id;
-                            sscanf(name, "p%d_r%d", &proc_id, &reg_id);
-                            printf("%d:r%d=%d; ", proc_id, reg_id, idx_vals[k]);
-                        } else if (strncmp(name, "var_", 4) == 0) {
-                            printf("%s=%d; ", name+4, idx_vals[k]);
-                        } else {
-                            printf("%s=%d; ", name, idx_vals[k]);
-                        }
-                    }
-                    printf("\n");
-                }
-            }
-        }
-    }
+void print_histogram(void) {
+        printf("TESTING\n");
 }
 
 /*****/
@@ -396,3 +356,4 @@ cleanup:
         BPF_DESTROY(TEST_NAME)(skel);
         return err;
 }
+
