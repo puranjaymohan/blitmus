@@ -353,12 +353,28 @@ int handle_tp{proc_id}(void *ctx)
 """
     return bpf_code
 
+def convert_var(v):
+        if v.startswith("P") and "_" in v:
+            p, reg = v[1:].split("_", 1)
+            return f'{p}:{reg}'
+        else:
+            return v
 
 def generate_user_c(litmus, user_header, user_footer, file_name):
 
+    cond_vars = sorted(litmus.cond_variables)
+    num_cond_vars = len (cond_vars)
+
     variables_code = "\n\t" + "\n\t".join(
-    	[f"unsigned long long {var} = skel->bss->shared.{var}[c];" for var in litmus.cond_variables]
+    	[f"unsigned long long {var} = skel->bss->shared.{var}[c];" for var in cond_vars]
 	)
+
+    keys_code = "\n\t" + "\n\t".join(
+    	[f"key_values[{i}] = skel->bss->shared.{var}[c];" for i, var in enumerate(cond_vars)]
+	)
+
+    entries = [f'"{convert_var(v)}"' for v in cond_vars]
+    names_array = f'const char *cond_vars_str[{len(entries)}] = {{{", ".join(entries)}}};'
 
     user_code = f"""/* Auto-generated from {litmus.name}.litmus */
 {user_header}
@@ -367,22 +383,41 @@ def generate_user_c(litmus, user_header, user_footer, file_name):
 #define TEST_NAME {file_name}
 #define TEST_NAME_PRINT "{litmus.name}"
 #define EXISTS_CLAUSE "{litmus.clause}"
+#define INTERNAL_ITERATIONS {VARIABLE_SIZE}
+#define NUM_KEYS {num_cond_vars}
+
+struct record {{
+        long long key[NUM_KEYS];
+        unsigned long long count;
+        bool target;
+        UT_hash_handle hh;
+}};
+
+{names_array}
+
+struct record *records = NULL;
+
 bool expected = true;
+
+void update_record(long long *key_values, bool target);
 
 static void check_cond (STRUCT_NAME(TEST_NAME) *skel, unsigned long long *matches,
                         unsigned long long *non_matches, int c) {{
 {variables_code}
 
+        bool target = false;
+        long long key_values[NUM_KEYS] = {{0}};
+
+{keys_code}
+
         // Check if this iteration matches the exists clause
         if ({litmus.exists_c}) {{
                 *matches += 1;
+                target = true;
         }} else {{
                 *non_matches += 1;
         }}
-}}
-
-void print_histogram(void) {{
-        printf("TESTING\\n");
+        update_record(key_values, target);
 }}
 
 {user_footer}

@@ -22,6 +22,7 @@
 #include <stdbool.h>
 #include <sys/sysinfo.h>
 #include <stdarg.h>
+#include "uthash.h"
 
 #define CONCAT(a, b) a##b
 #define MAKE_FUNC(name, suffix) CONCAT(name, suffix)
@@ -38,28 +39,84 @@
 #define TEST_NAME wrc_poonceonces_once
 #define TEST_NAME_PRINT "WRC+poonceonces+Once"
 #define EXISTS_CLAUSE "1:r0=1 /\\ 2:r0=1 /\\ 2:r1=0"
+#define INTERNAL_ITERATIONS 10000
+#define NUM_KEYS 3
+
+struct record {
+        long long key[NUM_KEYS];
+        unsigned long long count;
+        bool target;
+        UT_hash_handle hh;
+};
+
+const char *cond_vars_str[3] = {"1:r0", "2:r0", "2:r1"};
+
+struct record *records = NULL;
+
 bool expected = true;
+
+void update_record(long long *key_values, bool target);
 
 static void check_cond (STRUCT_NAME(TEST_NAME) *skel, unsigned long long *matches,
                         unsigned long long *non_matches, int c) {
 
-	unsigned long long P2_r1 = skel->bss->shared.P2_r1[c];
 	unsigned long long P1_r0 = skel->bss->shared.P1_r0[c];
 	unsigned long long P2_r0 = skel->bss->shared.P2_r0[c];
+	unsigned long long P2_r1 = skel->bss->shared.P2_r1[c];
+
+        bool target = false;
+        long long key_values[NUM_KEYS] = {0};
+
+
+	key_values[0] = skel->bss->shared.P1_r0[c];
+	key_values[1] = skel->bss->shared.P2_r0[c];
+	key_values[2] = skel->bss->shared.P2_r1[c];
 
         // Check if this iteration matches the exists clause
         if (((P1_r0 == 1) && (P2_r0 == 1) && (P2_r1 == 0))) {
                 *matches += 1;
+                target = true;
         } else {
                 *non_matches += 1;
         }
-}
-
-void print_histogram(void) {
-        printf("TESTING\n");
+        update_record(key_values, target);
 }
 
 /*****/
+void print_histogram() {
+	struct record *r, *tmp;
+	unsigned long long total = 0, num_states = 0;
+
+	HASH_ITER(hh, records, r, tmp) {
+        	total += r->count;
+        	num_states++;
+	}
+
+	printf("Histogram (%llu states)\n", num_states);
+
+	HASH_ITER(hh, records, r, tmp) {
+        	printf("%-8llu %c>", r->count, r->target ? '*' : ':');
+        	for (int i = 0; i < NUM_KEYS; i++) {
+            		printf("%s=%lld; ", cond_vars_str[i], r->key[i]);
+        	}
+       		printf("\n");
+    	}
+}
+
+void update_record(long long *key_values, bool target) {
+        struct record *r = NULL;
+
+        HASH_FIND(hh, records, key_values, sizeof(long long) * NUM_KEYS, r);
+        if (!r) {
+                r = malloc(sizeof(struct record));
+                memcpy(r->key, key_values, sizeof(long long) * NUM_KEYS);
+                r->count = 0;
+                r->target = false;
+                HASH_ADD(hh, records, key, sizeof(long long) * NUM_KEYS, r);
+        }
+        r->count += 1;
+        r->target = target;
+}
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
@@ -128,7 +185,7 @@ void reset_state(STRUCT_NAME(TEST_NAME) *skel) {
 void print_usage(const char *prog_name) {
         printf("Usage: %s [OPTIONS]\n", prog_name);
         printf("Options:\n");
-        printf("  -i, --iterations NUM   Number of test iterations (default: 1000000)\n");
+        printf("  -i, --iterations NUM   Number of test iterations (default: 4100)\n");
         printf("  -v, --verbose          Enable verbose output\n");
         printf("  -h, --help             Display this help message\n");
 }
@@ -300,7 +357,7 @@ int main(int argc, char **argv)
                         pthread_join(t[thread], NULL);
 
                 // Check results
-                for (int c = 0; c < 10000; c++) {
+                for (int c = 0; c < INTERNAL_ITERATIONS; c++) {
                         // Get the values for this iteration
                         check_cond(skel, &matches, &non_matches, c);
                 }
@@ -308,7 +365,7 @@ int main(int argc, char **argv)
                 if (config.verbose && i && i % (config.iterations / 10) == 0) {
                         printf("\rProgress: %d/%d iterations (%.1f%%) - Matches: %llu (%.4f%%)",
                                 i, config.iterations, (float)i/config.iterations*100,
-                                matches, ((float)matches/(i*10000))*100);
+                                matches, ((float)matches/(i*INTERNAL_ITERATIONS))*100);
                         fflush(stdout);
                 }
         }
@@ -341,7 +398,8 @@ int main(int argc, char **argv)
                 matches > 0 ? "validated" : "NOT validated");
 
         // Print observation summary
-        const char* result_type = matches > 0 ? (matches == (config.iterations * 1000) ? "Always" : "Sometimes") : "Never";
+        const char* result_type = matches > 0 ? (matches ==
+	(config.iterations * INTERNAL_ITERATIONS) ? "Always" : "Sometimes") : "Never";
 
         printf("Observation %s %s %llu %llu\n", TEST_NAME_PRINT,
                 result_type, matches, non_matches);

@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <sys/sysinfo.h>
 #include <stdarg.h>
+#include "uthash.h"
 
 #define CONCAT(a, b) a##b
 #define MAKE_FUNC(name, suffix) CONCAT(name, suffix)
