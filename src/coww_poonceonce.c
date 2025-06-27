@@ -284,7 +284,7 @@ int main(int argc, char **argv)
 
         int opt;
         int option_index = 0;
-        char optstring[50] = "i:vh:";
+        char optstring[50] = "i:vha:";
 
         while ((opt = getopt_long(argc, argv, optstring, long_options, &option_index)) != -1) {
                 switch (opt) {
