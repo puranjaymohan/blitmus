@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /* Auto-generated from Z6_0+pooncerelease+poacquirerelease+fencembonceonce.litmus */
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 #include <linux/bpf.h>
@@ -89,80 +90,64 @@ static void bpf_sense_barrier(__u32 *local_sense, int t)
 	}
 }
 
-/*
- * * Result: Sometimes
- * *
- * * This litmus test shows that a release-acquire chain, while sufficient
- * * when there is but one non-reads-from (AKA non-rf) link, does not suffice
- * * if there is more than one.  Of the three processes, only P1() reads from
- * * P0's write, which means that there are two non-rf links: P1() to P2()
- * * is a write-to-write link (AKA a "coherence" or just "co" link) and P2()
- * * to P0() is a read-to-write link (AKA a "from-reads" or just "fr" link).
- * * When there are two or more non-rf links, you typically will need one
- * * full barrier for each non-rf link.  (Exceptions include some cases
- * * involving locking.)
- */
-
 struct {
-    volatile __u64 x[10000];
-    volatile __u64 y[10000];
-    volatile __u64 z[10000];
-    volatile __u64 r1[10000];  // For P1_r0
-    volatile __u64 r2[10000];  // For P2_r1
+	volatile __u64 P1_r0[10000];
+	volatile __u64 P2_r1[10000];
+	volatile __u64 x[10000];
+	volatile __u64 y[10000];
+	volatile __u64 z[10000];
 } shared;
 
 int num_threads = 3;
-// Program for P0
-SEC("raw_tp/test_prog1")
-int handle_tp1(void *ctx)
-{
-	__u32 local_sense = 0;
-	int i;
 
-	bpf_sense_barrier(&local_sense, num_threads);
-	smp_mb();
-	bpf_for (i, 0, 10000) {
-		barrier_wait(0, i);
-		WRITE_ONCE(shared.x[i], 1);
+// Program for P0
+SEC("raw_tp/test_prog0")
+int handle_tp0(void *ctx)
+{
+		__u32 local_sense = 0;
+        int i;
+        bpf_sense_barrier(&local_sense, num_threads);
+        smp_mb();
+        bpf_for (i, 0, 10000) {
+                barrier_wait(0, i);
+                WRITE_ONCE(shared.x[i], 1);
 		smp_store_release(&shared.y[i], 1);
-	}
-	smp_mb();
-	return 0;
+        }
+        smp_mb();
+        return 0;
 }
 
 // Program for P1
-SEC("raw_tp/test_prog2")
-int handle_tp2(void *ctx)
+SEC("raw_tp/test_prog1")
+int handle_tp1(void *ctx)
 {
-	__u32 local_sense = 0;
-	int i;
-
-	bpf_sense_barrier(&local_sense, num_threads);
-	smp_mb();
-	bpf_for (i, 0, 10000) {
-		barrier_wait(1, i);
-		shared.r1[i] = smp_load_acquire(&shared.y[i]);
+		__u32 local_sense = 0;
+        int i;
+        bpf_sense_barrier(&local_sense, num_threads);
+        smp_mb();
+        bpf_for (i, 0, 10000) {
+                barrier_wait(1, i);
+                shared.P1_r0[i] = smp_load_acquire(&shared.y[i]);
 		smp_store_release(&shared.z[i], 1);
-	}
-	smp_mb();
-	return 0;
+        }
+        smp_mb();
+        return 0;
 }
 
 // Program for P2
-SEC("raw_tp/test_prog3")
-int handle_tp3(void *ctx)
+SEC("raw_tp/test_prog2")
+int handle_tp2(void *ctx)
 {
-	__u32 local_sense = 0;
-	int i;
-
-	bpf_sense_barrier(&local_sense, num_threads);
-	smp_mb();
-	bpf_for (i, 0, 10000) {
-		barrier_wait(2, i);
-		WRITE_ONCE(shared.z[i], 2);
+		__u32 local_sense = 0;
+        int i;
+        bpf_sense_barrier(&local_sense, num_threads);
+        smp_mb();
+        bpf_for (i, 0, 10000) {
+                barrier_wait(2, i);
+                WRITE_ONCE(shared.z[i], 2);
 		smp_mb();
-		shared.r2[i] = READ_ONCE(shared.x[i]);
-	}
-	smp_mb();
-	return 0;
+		shared.P2_r1[i] = READ_ONCE(shared.x[i]);
+        }
+        smp_mb();
+        return 0;
 }

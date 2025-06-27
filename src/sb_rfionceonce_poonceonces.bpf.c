@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /* Auto-generated from SB+rfionceonce+poonceonces.litmus */
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 #include <linux/bpf.h>
@@ -89,72 +90,49 @@ static void bpf_sense_barrier(__u32 *local_sense, int t)
 	}
 }
 
-/*
- * * Result: Sometimes
- * *
- * * This litmus test demonstrates that LKMM is not fully multicopy atomic.
- * x, 1);
- * r1 = READ_ONCE(*x);
- * r2 = READ_ONCE(*y);
- * }
- * 
- * P1(int *x, int *y)
- * {
- * int r3;
- * int r4;
- * 
- * WRITE_ONCE(*y, 1);
- * r3 = READ_ONCE(*y);
- * r4 = READ_ONCE(*x);
- * }
- * 
- * locations [0:r1; 1:r3; x; y] (* Debug aid: Print things not in "exists".
- */
-
 struct {
-    volatile __u64 x[10000];
-    volatile __u64 y[10000];
-    volatile __u64 r1[10000];  // For P0_r1
-    volatile __u64 r2[10000];  // For P0_r2
-    volatile __u64 r3[10000];  // For P1_r3
-    volatile __u64 r4[10000];  // For P1_r4
+	volatile __u64 P0_r1[10000];
+	volatile __u64 P0_r2[10000];
+	volatile __u64 P1_r3[10000];
+	volatile __u64 P1_r4[10000];
+	volatile __u64 x[10000];
+	volatile __u64 y[10000];
 } shared;
 
 int num_threads = 2;
-// Program for P0
-SEC("raw_tp/test_prog1")
-int handle_tp1(void *ctx)
-{
-	__u32 local_sense = 0;
-	int i;
 
-	bpf_sense_barrier(&local_sense, num_threads);
-	smp_mb();
-	bpf_for (i, 0, 10000) {
-		barrier_wait(0, i);
-		WRITE_ONCE(shared.x[i], 1);
-		shared.r1[i] = READ_ONCE(shared.x[i]);
-		shared.r2[i] = READ_ONCE(shared.y[i]);
-	}
-	smp_mb();
-	return 0;
+// Program for P0
+SEC("raw_tp/test_prog0")
+int handle_tp0(void *ctx)
+{
+		__u32 local_sense = 0;
+        int i;
+        bpf_sense_barrier(&local_sense, num_threads);
+        smp_mb();
+        bpf_for (i, 0, 10000) {
+                barrier_wait(0, i);
+                WRITE_ONCE(shared.x[i], 1);
+		shared.P0_r1[i] = READ_ONCE(shared.x[i]);
+		shared.P0_r2[i] = READ_ONCE(shared.y[i]);
+        }
+        smp_mb();
+        return 0;
 }
 
 // Program for P1
-SEC("raw_tp/test_prog2")
-int handle_tp2(void *ctx)
+SEC("raw_tp/test_prog1")
+int handle_tp1(void *ctx)
 {
-	__u32 local_sense = 0;
-	int i;
-
-	bpf_sense_barrier(&local_sense, num_threads);
-	smp_mb();
-	bpf_for (i, 0, 10000) {
-		barrier_wait(1, i);
-		WRITE_ONCE(shared.y[i], 1);
-		shared.r3[i] = READ_ONCE(shared.y[i]);
-		shared.r4[i] = READ_ONCE(shared.x[i]);
-	}
-	smp_mb();
-	return 0;
+		__u32 local_sense = 0;
+        int i;
+        bpf_sense_barrier(&local_sense, num_threads);
+        smp_mb();
+        bpf_for (i, 0, 10000) {
+                barrier_wait(1, i);
+                WRITE_ONCE(shared.y[i], 1);
+		shared.P1_r3[i] = READ_ONCE(shared.y[i]);
+		shared.P1_r4[i] = READ_ONCE(shared.x[i]);
+        }
+        smp_mb();
+        return 0;
 }

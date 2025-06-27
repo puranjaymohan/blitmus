@@ -69,7 +69,7 @@ LITMUS_FILES := $(wildcard litmus_tests/*.litmus)
 
 regen_litmus:
 	@for file in $(LITMUS_FILES); do \
-		./litmus2bpf.py -v $$file; \
+		./litmus2bpf.py $$file src; \
 	done
 
 $(OUTPUT) $(OUTPUT)/libbpf $(BPFTOOL_OUTPUT):

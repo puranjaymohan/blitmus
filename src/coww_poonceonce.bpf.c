@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /* Auto-generated from CoWW+poonceonce.litmus */
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 #include <linux/bpf.h>
@@ -89,32 +90,25 @@ static void bpf_sense_barrier(__u32 *local_sense, int t)
 	}
 }
 
-/*
- * * Result: Never
- * *
- * * Test of write-write coherence, that is, whether or not two successive
- * * writes to the same variable are ordered.
- */
-
 struct {
-    volatile __u64 x[10000];
+	volatile __u64 x[10000];
 } shared;
 
 int num_threads = 1;
-// Program for P0
-SEC("raw_tp/test_prog1")
-int handle_tp1(void *ctx)
-{
-	__u32 local_sense = 0;
-	int i;
 
-	bpf_sense_barrier(&local_sense, num_threads);
-	smp_mb();
-	bpf_for (i, 0, 10000) {
-		barrier_wait(0, i);
-		WRITE_ONCE(shared.x[i], 1);
+// Program for P0
+SEC("raw_tp/test_prog0")
+int handle_tp0(void *ctx)
+{
+		__u32 local_sense = 0;
+        int i;
+        bpf_sense_barrier(&local_sense, num_threads);
+        smp_mb();
+        bpf_for (i, 0, 10000) {
+                barrier_wait(0, i);
+                WRITE_ONCE(shared.x[i], 1);
 		WRITE_ONCE(shared.x[i], 2);
-	}
-	smp_mb();
-	return 0;
+        }
+        smp_mb();
+        return 0;
 }
