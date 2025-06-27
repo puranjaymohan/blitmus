@@ -44,22 +44,27 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 struct test_config {
         int iterations;
         int *cpus;
+	bool aff;
         int verbose;
 };
 
 struct worker_args {
         int cpu;
         int prog_fd;
+	bool aff;
         pthread_barrier_t *barrier;
 };
 
-static int run_bpf_on_cpu(int prog_fd, int cpu)
+static int run_bpf_on_cpu(int prog_fd, int cpu, bool aff)
 {
         struct bpf_test_run_opts opts = {
                 .sz = sizeof(struct bpf_test_run_opts),
-                .flags = BPF_F_TEST_RUN_ON_CPU,
-                .cpu = cpu,
         };
+
+	if (aff) {
+		opts.flags = BPF_F_TEST_RUN_ON_CPU;
+		opts.cpu = cpu;
+	}
 
         int err = bpf_prog_test_run_opts(prog_fd, &opts);
         if (err) {
@@ -76,20 +81,23 @@ void *worker(void *arg)
         struct worker_args *args = (struct worker_args *)arg;
         int cpu = args->cpu;
         int prog_fd = args->prog_fd;
+	bool aff = args->aff;
 
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        CPU_SET(cpu, &cpuset);
+	if (aff) {
+		cpu_set_t cpuset;
+		CPU_ZERO(&cpuset);
+		CPU_SET(cpu, &cpuset);
 
-        if (sched_setaffinity(0, sizeof(cpuset), &cpuset)) {
-                perror("sched_setaffinity");
-                return NULL;
-        }
+		if (sched_setaffinity(0, sizeof(cpuset), &cpuset)) {
+			perror("sched_setaffinity");
+			return NULL;
+		}
+	}
 
         pthread_barrier_wait(args->barrier);
 
         // Run the BPF program on the specified CPU
-        run_bpf_on_cpu(prog_fd, cpu);
+        run_bpf_on_cpu(prog_fd, cpu, aff);
 
         return NULL;
 }
@@ -103,6 +111,7 @@ void print_usage(const char *prog_name) {
         printf("Options:\n");
         printf("  -i, --iterations NUM   Number of test iterations (default: 4100)\n");
         printf("  -v, --verbose          Enable verbose output\n");
+        printf("  -a, --affinity         Pin threads to randomly selected cpus\n");
         printf("  -h, --help             Display this help message\n");
 }
 
@@ -169,10 +178,8 @@ int main(int argc, char **argv)
         struct test_config config = {
                 .iterations = 4100,
                 .verbose = 0,
+		.aff = 0
         };
-
-        config.cpus = malloc(sizeof(int) * THREADS);
-	select_random_cpus(config.cpus);
 
         unsigned long long  matches = 0, non_matches = 0;
 
@@ -190,6 +197,7 @@ int main(int argc, char **argv)
         static struct option long_options[] = {
                 {"iterations", required_argument, 0, 'i'},
                 {"verbose", no_argument, 0, 'v'},
+                {"affinity", no_argument, 0, 'a'},
                 {"help", no_argument, 0, 'h'},
                 {0, 0, 0, 0}
         };
@@ -206,6 +214,9 @@ int main(int argc, char **argv)
                 case 'v':
                         config.verbose = 1;
                         break;
+		case 'a':
+			config.aff = 1;
+			break;
                 case 'h':
                         print_usage(argv[0]);
                         return 0;
@@ -214,6 +225,11 @@ int main(int argc, char **argv)
                         return 1;
                 }
         }
+
+	if (config.aff) {
+		config.cpus = malloc(sizeof(int) * THREADS);
+		select_random_cpus(config.cpus);
+	}
 
         /* Set up libbpf errors and debug info callback */
         libbpf_set_print(libbpf_print_fn);
@@ -260,9 +276,12 @@ int main(int argc, char **argv)
         for (i = 0; i < config.iterations; i++) {
                 reset_state(skel);
 
-		select_random_cpus(config.cpus);
+		if (config.aff)
+			select_random_cpus(config.cpus);
                 for (int thread = 0; thread < THREADS; thread++) {
-                        args[thread].cpu = config.cpus[thread];
+			if (config.aff)
+				args[thread].cpu = config.cpus[thread];
+			args[thread].aff = config.aff;
                         args[thread].prog_fd = prog_fds[thread];
                         args[thread].barrier = &barrier;
 
