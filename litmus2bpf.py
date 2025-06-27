@@ -381,10 +381,12 @@ def convert_var(v):
         else:
             return v
 
-def generate_user_c(litmus, user_header, user_footer, file_name):
+def generate_user_c(litmus, user_header, user_footer, file_name,
+                    result_type):
 
     cond_vars = sorted(litmus.cond_variables)
     num_cond_vars = len (cond_vars)
+    expected_val = "true" if result_type in ["Sometimes", "Always"] else "false"
 
     variables_code = "\n\t" + "\n\t".join(
     	[f"unsigned long long {var} = skel->bss->shared.{var}[c];" for var in cond_vars]
@@ -418,7 +420,7 @@ struct record {{
 
 struct record *records = NULL;
 
-bool expected = true;
+bool expected = {expected_val};
 
 void update_record(long long *key_values, bool target);
 
@@ -461,9 +463,9 @@ def strip_comments(text):
 
     return text
 
-def parse_litmus(path):
+def parse_litmus(data):
     parser = Lark(LITMUS_GRAMMAR, parser="lalr", lexer="contextual", transformer=LitmusTransformer())
-    tree = parser.parse(strip_comments(open(path).read()))
+    tree = parser.parse(strip_comments(data))
     return tree
 
 def main():
@@ -472,7 +474,13 @@ def main():
     parser.add_argument("out_dir", help="Output directory")
     args = parser.parse_args()
 
-    litmus = parse_litmus(args.litmus_file)
+    data = open(args.litmus_file).read()
+
+    result_match = re.search(r'Result:\s*(\w+)', data)
+    if result_match:
+        result_type = result_match.group(1)
+
+    litmus = parse_litmus(data)
     os.makedirs(args.out_dir, exist_ok=True)
     file_name = litmus.name.lower().replace('+', '_').replace('-','_')
     out_bpf_file = os.path.join(args.out_dir, file_name + ".bpf.c")
@@ -489,7 +497,8 @@ def main():
         user_footer = f.read()
 
     bpf_code = generate_bpf_c(litmus, bpf_header)
-    user_code = generate_user_c(litmus, user_header, user_footer, file_name)
+    user_code = generate_user_c(litmus, user_header, user_footer,
+                                file_name, result_type)
 
     with open(out_bpf_file, "w") as f:
         f.write("// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause\n")

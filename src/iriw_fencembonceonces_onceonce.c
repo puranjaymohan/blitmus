@@ -53,7 +53,7 @@ const char *cond_vars_str[4] = {"1:r0", "1:r1", "3:r0", "3:r1"};
 
 struct record *records = NULL;
 
-bool expected = true;
+bool expected = false;
 
 void update_record(long long *key_values, bool target);
 
