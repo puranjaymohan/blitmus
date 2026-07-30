@@ -18,7 +18,7 @@ The tool consists of:
 sudo ./run.sh
 System Information:
   CPU Architecture : aarch64
-  Kernel Version   : 6.16.0-rc2+
+  Kernel Version   : 7.2.0-rc4-gdf3dbd50bdec
 
 Running tests...
 
@@ -42,10 +42,11 @@ Running tests...
   Running coww_poonceonce... ✓
   Running iriw_fencembonceonces_onceonce... ✓
   Running r_fencembonceonces... ✓
-  Running s_fencewmbonceonce_poacquireonce... ✗ (exit code: 1)
   Running s_poonceonces... ✓
   Running z6_0_pooncerelease_poacquirerelease_fencembonceonce... ✓
   Running sb_rfionceonce_poonceonces... ✓
+  Running s_fencembonceonce_poacquireonce... ✓
+  Running iriw_poacquireacquire_releaserelease... ✓
 
 ╔══════════════════════════════════════════════════════════════════════════════════════╗
 ║                             BPF Litmus Test Batch Runner                             ║
@@ -53,40 +54,40 @@ Running tests...
 ╔═══════════════════════════════════════╤══════════╤════════════╤════════════╤═════════╗
 ║ Test Name                             │ Result   │ Positive   │ Negative   │ Pos %   ║
 ╠═══════════════════════════════════════╪══════════╪════════════╪════════════╪═════════╣
-║ IRIW+poonceonces+OnceOnce             │ ✓ OK     │         90 │   40999910 │   0.00% ║
-║ R+poonceonces                         │ ✓ OK     │   25164300 │   15835700 │  61.38% ║
-║ SB+poonceonces                        │ ✓ OK     │   33179289 │    7820711 │  80.93% ║
-║ SB+fencembonceonces                   │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ MP+pooncerelease+poacquireonce        │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ MP+poonceonces                        │ ✓ OK     │    1097757 │   39902243 │   2.68% ║
-║ dep+plain                             │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ WRC+poonceonces+Once                  │ ✓ OK     │         55 │   40999945 │   0.00% ║
-║ WRC+pooncerelease+fencermbonceonc     │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ ISA2+pooncerelease+poacquirerelea     │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ ISA2+poonceonces                      │ ✓ OK     │      45266 │   40954734 │   0.11% ║
-║ LB+poonceonces                        │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ LB+fencembonceonce+ctrlonceonce       │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ LB+poacquireonce+pooncerelease        │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ CoRR+poonceonce+Once                  │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ CoRW+poonceonce+Once                  │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ CoWR+poonceonce+Once                  │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ CoWW+poonceonce                       │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ IRIW+fencembonceonces+OnceOnce        │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ R+fencembonceonces                    │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ S+fencewmbonceonce+poacquireonce      │ ✗ FAILED │      13631 │   40986369 │   0.03% ║
-║ S+poonceonces                         │ ✓ OK     │      19961 │   40980039 │   0.05% ║
-║ Z6_0+pooncerelease+poacquirerelea     │ ✓ OK     │          0 │   41000000 │   0.00% ║
-║ SB+rfionceonce+poonceonces            │ ✓ OK     │    1792533 │   39207467 │   4.37% ║
+║ IRIW+poonceonces+OnceOnce             │ ✓ OK     │      2,244 │ 40,997,756 │   0.01% ║
+║ R+poonceonces                         │ ✓ OK     │ 12,836,222 │ 28,163,778 │  31.31% ║
+║ SB+poonceonces                        │ ✓ OK     │ 19,297,498 │ 21,702,502 │  47.07% ║
+║ SB+fencembonceonces                   │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ MP+pooncerelease+poacquireonce        │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ MP+poonceonces                        │ ✓ OK     │  2,232,003 │ 38,767,997 │   5.44% ║
+║ dep+plain                             │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ WRC+poonceonces+Once                  │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ WRC+pooncerelease+fencermbonceonc     │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ ISA2+pooncerelease+poacquirerelea     │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ ISA2+poonceonces                      │ ✓ OK     │    742,276 │ 40,257,724 │   1.81% ║
+║ LB+poonceonces                        │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ LB+fencembonceonce+ctrlonceonce       │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ LB+poacquireonce+pooncerelease        │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ CoRR+poonceonce+Once                  │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ CoRW+poonceonce+Once                  │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ CoWR+poonceonce+Once                  │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ CoWW+poonceonce                       │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ IRIW+fencembonceonces+OnceOnce        │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ R+fencembonceonces                    │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ S+poonceonces                         │ ✓ OK     │    131,445 │ 40,868,555 │   0.32% ║
+║ Z6_0+pooncerelease+poacquirerelea     │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ SB+rfionceonce+poonceonces            │ ✓ OK     │ 10,069,429 │ 30,930,571 │  24.56% ║
+║ S+fencembonceonce+poacquireonce       │ ✓ OK     │          0 │ 41,000,000 │   0.00% ║
+║ IRIW+poacquireacquire+releaserele     │ ✓ OK     │      1,254 │ 40,998,746 │   0.00% ║
 ╚═══════════════════════════════════════╧══════════╧════════════╧════════════╧═════════╝
 
 Summary:
-  Total Tests: 24
-  ✓ Passed:   23
-  ✗ Failed:   1
+  Total Tests: 25
+  ✓ Passed:   25
+  ✗ Failed:   0
   ⚠ Missing:  0
 
-⚠ Some tests failed. Check individual logs in the logs/ directory for details.
-
+✓ All available tests completed successfully!
 ```
 
 ## Litmus Test Format
