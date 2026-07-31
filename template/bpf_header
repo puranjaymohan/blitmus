@@ -1,22 +1,36 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * blitmus BPF-side runtime: memory-ordering primitives and the per-slot
+ * inter-CPU synchronisation.  Concatenated ahead of the generated body by
+ * litmus2bpf.py.
+ */
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-volatile __u64 sync_flag[10000] = {0};
+/* Independent litmus instances per program invocation (see litmus2bpf.py). */
+#ifndef BLITMUS_SLOTS
+#define BLITMUS_SLOTS 10000
+#endif
+
+/*
+ * Tuning knobs for the per-slot barrier: how long a waiter spins for its peer
+ * before giving up.  Larger values tighten the window in which the processes
+ * run concurrently (better reordering coverage) at the cost of throughput.
+ */
+#define BARRIER_SPIN 256
+#define SENSE_SPIN   200
+
+volatile __u64 sync_flag[BLITMUS_SLOTS];
 volatile __u32 count;
 volatile __u32 sense;
 
 /*
- * __unqual_scalar_typeof(x) - Declare an unqualified scalar type, leaving
- *			       non-scalar types unchanged.
+ * __unqual_scalar_typeof(x): the type of x with top-level qualifiers removed,
+ * leaving non-scalars unchanged.  Copied from the kernel; needed so
+ * smp_load_acquire()/smp_store_release() work on volatile/atomic operands.
  */
-/*
- * Prefer C11 _Generic for better compile-times and simpler code. Note: 'char'
- * is not type-compatible with 'signed char', and we define a separate case.
- */
-
 #define __scalar_type_to_expr_cases(type)				\
 		unsigned type:	(unsigned type)0,			\
 		signed type:	(signed type)0
@@ -31,15 +45,20 @@ volatile __u32 sense;
 			 __scalar_type_to_expr_cases(long long),	\
 			 default: (x)))
 
-#define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
+#define READ_ONCE(x)		(*(volatile typeof(x) *)&(x))
+#define WRITE_ONCE(x, val)	((*(volatile typeof(x) *)&(x)) = (val))
 
-#define WRITE_ONCE(x, val) ((*(volatile typeof(x) *)&(x)) = (val))
-
+/*
+ * smp_mb(): a full memory barrier.  BPF has no fence instruction, so we emit a
+ * value-returning atomic RMW, which the JITs lower to a fully-ordered atomic
+ * (arm64: LDADDAL, or LL/SC + DMB).  The target is a private stack slot; only
+ * the emitted instruction's barrier matters, not the location or the result.
+ */
 #define smp_mb()						\
-        ({							\
-                volatile __u64 __val;				\
-		__val = __sync_fetch_and_add(&__val, 0);	\
-        })
+	({							\
+		volatile __u64 __mb = 0;			\
+		(void)__sync_fetch_and_add(&__mb, 0);		\
+	})
 
 #define smp_load_acquire(p)					\
 	({							\
@@ -54,36 +73,69 @@ volatile __u32 sense;
 		__atomic_store(p, &__val, __ATOMIC_RELEASE);	\
 	})
 
-int barrier_wait(unsigned int id, unsigned int i)
+/*
+ * Atomic read-modify-write primitives.  Each maps to a distinct BPF atomic
+ * instruction, so litmus tests exercise the corresponding JIT lowering:
+ *
+ *   xchg / cmpxchg / atomic_fetch_add  -> value-returning RMW: fully ordered
+ *       (LKMM: like smp_mb).  BPF_XCHG / BPF_CMPXCHG / BPF_ADD|BPF_FETCH.
+ *       arm64 LSE:  SWPAL / CASAL / LDADDAL;  LL/SC: LDXR..STLXR..DMB.
+ *
+ *   atomic_add  -> non-value-returning RMW: relaxed (LKMM: no ordering).
+ *       BPF_ADD (no FETCH).  arm64 LSE: STADD;  LL/SC: LDXR..STXR.
+ *
+ * The first argument is the address (a bare litmus variable becomes
+ * &shared.v[i] in generated code).
+ */
+#define xchg(p, v)		__atomic_exchange_n((p), (v), __ATOMIC_SEQ_CST)
+
+#define cmpxchg(p, o, n)						\
+	({								\
+		__u64 __old = (o);					\
+		__atomic_compare_exchange_n((p), &__old, (n), 0,	\
+					    __ATOMIC_SEQ_CST,		\
+					    __ATOMIC_RELAXED);		\
+		__old;							\
+	})
+
+#define atomic_fetch_add(p, v)	__sync_fetch_and_add((p), (v))
+#define atomic_add(p, v)	((void)__atomic_fetch_add((p), (v), __ATOMIC_RELAXED))
+
+/*
+ * Per-slot rendezvous: for slot i, the process whose id matches i's parity
+ * raises sync_flag[i]; the other briefly spins on it.  This nudges the
+ * processes to enter slot i's litmus code at roughly the same time, widening
+ * the window for weak-memory reordering.  Best-effort by design.
+ */
+static int barrier_wait(unsigned int id, unsigned int i)
 {
-	if (i >= 10000)
+	if (i >= BLITMUS_SLOTS)
 		return 0;
 
 	if ((i % 2) == id) {
 		WRITE_ONCE(sync_flag[i], 1);
 		smp_mb();
 	} else {
-		for (int ii=0; ii<256; ii++) {
-			if (READ_ONCE(sync_flag[i]) != 0) return 0;
-		}
+		for (int s = 0; s < BARRIER_SPIN; s++)
+			if (READ_ONCE(sync_flag[i]) != 0)
+				break;
 	}
 	return 0;
 }
 
+/* Sense-reversing barrier: release all @t processes into the slot loop together. */
 static void bpf_sense_barrier(__u32 *local_sense, int t)
 {
 	*local_sense = !(*local_sense);
-
 	__sync_fetch_and_add(&count, 1);
 
 	if (__sync_fetch_and_add(&count, 0) == t) {
-		// Last thread resets count and flips sense
+		/* Last arrival resets the count and flips the shared sense. */
 		count = 0;
 		sense = *local_sense;
 	} else {
-		for (int i = 0; i < 200; i++) {
+		for (int s = 0; s < SENSE_SPIN; s++)
 			if (sense == *local_sense)
 				break;
-		}
 	}
 }

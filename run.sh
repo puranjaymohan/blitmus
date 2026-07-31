@@ -8,8 +8,14 @@ echo "  CPU Architecture : $cpu_arch"
 echo "  Kernel Version   : $kernel_ver"
 echo
 
-# Extract apps from Makefile
-apps=$(grep "^APPS =" Makefile | sed 's/APPS = //' )
+# Discover built test executables in bin/
+BIN=bin
+apps=$(cd "$BIN" 2>/dev/null && ls)
+
+if [[ -z "$apps" ]]; then
+    echo "No executables in $BIN/. Run 'make' first."
+    exit 1
+fi
 
 # Prepare logs directory
 mkdir -p logs
@@ -23,7 +29,7 @@ echo
 
 # Run tests sequentially to capture exit codes
 for app in $apps; do
-    file="./$app"
+    file="$BIN/$app"
     if [[ -x "$file" && -f "$file" ]]; then
         echo -n "  Running $app... "
         if "$file" > "logs/${app}.log" 2>&1; then

@@ -1,11 +1,26 @@
 # SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-OUTPUT := src/.output
-CLANG ?= clang
-LIBBPF_SRC := $(abspath src/libbpf/src)
-BPFTOOL_SRC := $(abspath src/bpftool/src)
-LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
+#
+# blitmus build
+#   litmus_tests/*.litmus --(litmus2bpf.py)--> .output/gen/*.{c,bpf.c} --> bin/<test>
+# All generated/build artifacts live under .output/ and bin/ (both gitignored);
+# nothing generated is committed.
+#
+# Usage:
+#   make            regenerate sources and build every test into bin/
+#   make regen      (re)generate .output/gen from litmus_tests/
+#   make build      build all discovered tests into bin/ (no regen)
+#   make clean      remove .output/ and bin/
+#   make run        build, then run every test (via ./run.sh)
+
+OUTPUT         := .output
+GEN            := $(OUTPUT)/gen
+BIN            := bin
+CLANG          ?= clang
+LIBBPF_SRC     := $(abspath src/libbpf/src)
+BPFTOOL_SRC    := $(abspath src/bpftool/src)
+LIBBPF_OBJ     := $(abspath $(OUTPUT)/libbpf.a)
 BPFTOOL_OUTPUT ?= $(abspath $(OUTPUT)/bpftool)
-BPFTOOL ?= $(BPFTOOL_OUTPUT)/bootstrap/bpftool
+BPFTOOL        ?= $(BPFTOOL_OUTPUT)/bootstrap/bpftool
 ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' \
 			 | sed 's/arm.*/arm/' \
 			 | sed 's/aarch64/arm64/' \
@@ -14,23 +29,21 @@ ARCH ?= $(shell uname -m | sed 's/x86_64/x86/' \
 			 | sed 's/riscv64/riscv/' \
 			 | sed 's/loongarch64/loongarch/')
 VMLINUX := src/vmlinux/$(ARCH)/vmlinux.h
-# Use our own libbpf API headers and Linux UAPI headers distributed with
-# libbpf to avoid dependency on system-wide headers, which could be missing or
-# outdated
-INCLUDES := -I$(OUTPUT) -Isrc/libbpf/include/uapi -I$(dir $(VMLINUX))
+
+# Our own libbpf/UAPI headers, template/ (reusable bpf_header etc.), and the
+# build dir (for the generated *.skel.h).
+INCLUDES := -I$(OUTPUT) -Itemplate -Isrc/libbpf/include/uapi -I$(dir $(VMLINUX))
 CFLAGS := -g -Wall
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS) -lrt -ldl -lpthread -lm
 
-APPS = iriw_poonceonces_onceonce r_poonceonces sb_poonceonces sb_fencembonceonces mp_pooncerelease_poacquireonce mp_poonceonces dep_plain wrc_poonceonces_once wrc_pooncerelease_fencermbonceonce_once isa2_pooncerelease_poacquirerelease_poacquireonce isa2_poonceonces lb_poonceonces lb_fencembonceonce_ctrlonceonce lb_poacquireonce_pooncerelease corr_poonceonce_once corw_poonceonce_once cowr_poonceonce_once coww_poonceonce iriw_fencembonceonces_onceonce r_fencembonceonces s_poonceonces z6_0_pooncerelease_poacquirerelease_fencembonceonce sb_rfionceonce_poonceonces s_fencembonceonce_poacquireonce iriw_poacquireacquire_releaserelease
+vpath %.bpf.c $(GEN)
+vpath %.c     $(GEN)
 
-# Get Clang's default includes on this system. We'll explicitly add these dirs
-# to the includes list when compiling with `-target bpf` because otherwise some
-# architecture-specific dirs will be "missing" on some architectures/distros -
-# headers such as asm/types.h, asm/byteorder.h, asm/socket.h, asm/sockios.h,
-# sys/cdefs.h etc. might be missing.
-#
-# Use '-idirafter': Don't interfere with include mechanics except where the
-# build would have failed anyways.
+# A test is any userspace .c (excluding the *.bpf.c programs) in $(GEN).
+APPS := $(sort $(patsubst %.c,%,$(notdir $(filter-out %.bpf.c,$(wildcard $(GEN)/*.c)))))
+
+# Clang's default includes, added for -target bpf (some asm/* headers otherwise
+# missing on some arches).  -idirafter so we don't disturb normal include order.
 CLANG_BPF_SYS_INCLUDES ?= $(shell $(CLANG) -v -E - </dev/null 2>&1 \
 	| sed -n '/<...> search starts here:/,/End of search list./{ s| \(/.*\)|-idirafter \1|p }')
 
@@ -55,24 +68,31 @@ endef
 $(call allow-override,CC,$(CROSS_COMPILE)cc)
 $(call allow-override,LD,$(CROSS_COMPILE)ld)
 
+# Default: regenerate sources, then build.  Two phases (recursive make) so the
+# APPS wildcard sees the freshly generated .output/gen files.
 .PHONY: all
-all: $(APPS)
+all:
+	$(Q)$(MAKE) regen
+	$(Q)$(MAKE) build
+
+.PHONY: build
+build: $(addprefix $(BIN)/,$(APPS))
+
+.PHONY: regen
+regen: | $(GEN)
+	$(call msg,REGEN,litmus_tests/*.litmus)
+	$(Q)for f in litmus_tests/*.litmus; do ./litmus2bpf.py "$$f" >/dev/null || exit 1; done
+
+.PHONY: run
+run: all
+	$(Q)./run.sh
 
 .PHONY: clean
 clean:
 	$(call msg,CLEAN)
-	$(Q)rm -rf $(OUTPUT) $(APPS)
+	$(Q)rm -rf $(OUTPUT) $(BIN)
 
-.PHONY: regen_litmus
-
-LITMUS_FILES := $(wildcard litmus_tests/*.litmus)
-
-regen_litmus:
-	@for file in $(LITMUS_FILES); do \
-		./litmus2bpf.py -v $$file; \
-	done
-
-$(OUTPUT) $(OUTPUT)/libbpf $(BPFTOOL_OUTPUT):
+$(OUTPUT) $(GEN) $(BIN) $(OUTPUT)/libbpf $(BPFTOOL_OUTPUT):
 	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
 
@@ -84,17 +104,17 @@ $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPU
 		    INCLUDEDIR= LIBDIR= UAPIDIR=			      \
 		    install
 
-# Build bpftool
+# Build bpftool (bootstrap)
 $(BPFTOOL): | $(BPFTOOL_OUTPUT)
 	$(call msg,BPFTOOL,$@)
 	$(Q)$(MAKE) ARCH= CROSS_COMPILE= OUTPUT=$(BPFTOOL_OUTPUT)/ -C $(BPFTOOL_SRC) bootstrap
 
-# Build BPF code
-$(OUTPUT)/%.bpf.o: src/%.bpf.c $(LIBBPF_OBJ) $(wildcard src/%.h) $(VMLINUX) | $(OUTPUT) $(BPFTOOL)
+# Build BPF object
+$(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) $(VMLINUX) | $(OUTPUT) $(BPFTOOL)
 	$(call msg,BPF,$@)
-	$(Q)$(CLANG) -mcpu=v4 -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)		      \
+	$(Q)$(CLANG) -mcpu=v4 -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)	      \
 		     $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES)		      \
-		     -c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
+		     -c $(filter %.bpf.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 
 # Generate BPF skeletons
@@ -102,20 +122,21 @@ $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT) $(BPFTOOL)
 	$(call msg,GEN-SKEL,$@)
 	$(Q)$(BPFTOOL) gen skeleton $< > $@
 
-# Build user-space code
-$(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
+# Each app's userspace object needs its skeleton first
+$(addprefix $(OUTPUT)/,$(addsuffix .o,$(APPS))): $(OUTPUT)/%.o: $(OUTPUT)/%.skel.h
 
-$(OUTPUT)/%.o: src/%.c $(wildcard %.h) | $(OUTPUT)
+# Build userspace object
+$(OUTPUT)/%.o: %.c | $(OUTPUT)
 	$(call msg,CC,$@)
 	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
 
-# Build application binary
-$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
+# Link the test binary into bin/
+$(BIN)/%: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(BIN)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $^ $(ALL_LDFLAGS) -lelf -lz -o $@
 
 # delete failed targets
 .DELETE_ON_ERROR:
 
-# keep intermediate (.skel.h, .bpf.o, etc) targets
+# keep intermediate (.skel.h, .bpf.o, .o) targets
 .SECONDARY:

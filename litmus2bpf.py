@@ -9,7 +9,19 @@ import os
 import re
 import sys
 import argparse
-from typing import Dict, List, Tuple, Set, Optional
+
+# Independent litmus instances per BPF program invocation ("slots").  One
+# userspace round runs the litmus code NR_SLOTS times for a fast statistical
+# sample.  Keep in sync with BLITMUS_SLOTS in template/bpf_header.
+NR_SLOTS = 10000
+# Default number of rounds (each runs the litmus code NR_SLOTS times).
+DEFAULT_ITERATIONS = 4100
+# Histogram dimension per observed value.  Litmus outcomes are small integers
+# (0/1/2); indices are clamped to this so an unexpected value can never index
+# the states[] array out of bounds.  Kept small so many-condition tests stay
+# cheap (states is HIST_DIM ** nr_conditions entries).
+HIST_DIM = 8
+
 
 class LitmusParser:
     """Parser for litmus test files"""
@@ -23,12 +35,21 @@ class LitmusParser:
         self.exists_clause = ""
         self.comments = []
         self.result_type = ""
+        self.conditions = []           # [(proc_id, reg, value)]
+        self.variable_conditions = []  # [(var, value)]
+        self.array_sizes = {}          # {var: size} for variables used as v[expr]
 
     def parse(self) -> bool:
         """Parse the litmus test file"""
         try:
             with open(self.filename, 'r') as f:
                 content = f.read()
+
+            # Structural parsing (processes, exists) runs on a copy with C++
+            # line comments removed, so a "// comment" between the parameter
+            # list and the process body doesn't defeat the block regexes.
+            # Name/Result/(* *) extraction still uses the raw content.
+            code_content = re.sub(r'//[^\n]*', '', content)
 
             # Extract test name
             name_match = re.search(r'^C\s+(\S+)', content, re.MULTILINE)
@@ -46,7 +67,7 @@ class LitmusParser:
                 if result_match:
                     self.result_type = result_match.group(1)
 
-            process_blocks = re.findall(r'P\d+\s*\([^)]*\)\s*\{[^}]*\}', content, re.DOTALL)
+            process_blocks = re.findall(r'P\d+\s*\([^)]*\)\s*\{[^}]*\}', code_content, re.DOTALL)
             for block in process_blocks:
                 process = {}
 
@@ -86,8 +107,23 @@ class LitmusParser:
             # Sort processes by ID
             self.processes.sort(key=lambda p: p['id'])
 
+            # Detect array variables (used as v[expr], e.g. a data-dependent
+            # index for an address-dependency test).  Size = next power of two
+            # above the largest literal index (>= 2).
+            all_ops = ' '.join(op for proc in self.processes
+                               for op in proc.get('operations', []))
+            for v in self.variables:
+                if not re.search(rf'\b{re.escape(v)}\s*\[', all_ops):
+                    continue
+                lits = re.findall(rf'\b{re.escape(v)}\s*\[\s*(\d+)\s*\]', all_ops)
+                max_lit = max((int(x) for x in lits), default=1)
+                size = 2
+                while size <= max_lit:
+                    size *= 2
+                self.array_sizes[v] = size
+
             # Extract exists clause
-            exists_match = re.search(r'exists\s+\(([^)]*)\)', content)
+            exists_match = re.search(r'exists\s+\(([^)]*)\)', code_content)
             if exists_match:
                 self.exists_clause = exists_match.group(1).strip()
 
@@ -96,8 +132,11 @@ class LitmusParser:
 
             return True
 
+        except OSError as e:
+            print(f"blitmus: cannot read {self.filename}: {e}", file=sys.stderr)
+            return False
         except Exception as e:
-            print(f"Error parsing litmus test: {e}")
+            print(f"blitmus: failed to parse {self.filename}: {e}", file=sys.stderr)
             return False
 
     def parse_exists_clause(self):
@@ -131,6 +170,25 @@ class LitmusParser:
 
             print(f"Warning: Could not parse exists clause part: {part}")
 
+    # Ordering primitives the BPF backend/template can actually lower.  BPF has
+    # no instruction for a standalone read/write barrier, so smp_wmb()/smp_rmb()
+    # (and RMW/RCU/lock primitives) are intentionally absent.
+    SUPPORTED_CALLS = {
+        'READ_ONCE', 'WRITE_ONCE',
+        'smp_mb', 'smp_load_acquire', 'smp_store_release',
+        'xchg', 'cmpxchg', 'atomic_fetch_add', 'atomic_add',
+    }
+    _CONTROL_KEYWORDS = {'if', 'while', 'for', 'switch', 'return', 'sizeof'}
+
+    def unsupported_primitives(self):
+        """Return the primitives used by the test that the BPF backend cannot
+        express (empty set means the test is fully supported)."""
+        used = set()
+        for proc in self.processes:
+            for op in proc.get('operations', []):
+                used.update(re.findall(r'\b([A-Za-z_]\w*)\s*\(', op))
+        return used - self.SUPPORTED_CALLS - self._CONTROL_KEYWORDS
+
     def get_summary(self) -> str:
         """Return a summary of the parsed litmus test"""
         summary = []
@@ -150,7 +208,7 @@ class LitmusParser:
             summary.append("Conditions:")
             for proc_id, reg, value in self.conditions:
                 summary.append(f"  P{proc_id}:{reg}={value}")
-            for var, value in getattr(self, 'variable_conditions', []):
+            for var, value in self.variable_conditions:
                 summary.append(f"  {var}={value}")
 
         return "\n".join(summary)
@@ -161,54 +219,115 @@ class BPFGenerator:
     def __init__(self, parser: LitmusParser, bpf_header_filename: str, user_header_filename: str, user_footer_filename: str):
         self.parser = parser
         self.max_processes = 8  # Maximum number of processes supported
-        self.reg_mapping = {}  # Will be populated during BPF generation
         self.bpf_header_file = bpf_header_filename
         self.user_header_file = user_header_filename
         self.user_footer_file = user_footer_filename
 
-    def _create_register_mapping(self):
-        """Create a mapping from (proc_id, reg) to sequential register numbers"""
-        reg_counter = 1
-        reg_mapping = {}
-        for proc in self.parser.processes:
-            proc_id = proc['id']
-            for reg in proc.get('registers', []):
-                reg_mapping[(proc_id, reg)] = reg_counter
-                reg_counter += 1
-        return reg_mapping
+    def _observed_regs(self):
+        """Return the (proc_id, reg) pairs observed by the exists clause.
+
+        These are klitmus's "finals": the only registers whose value has to
+        leave the thread, so they are the only ones spilled to shared memory.
+        """
+        seen = []
+        for proc_id, reg, _ in self.parser.conditions:
+            if (proc_id, reg) not in seen:
+                seen.append((proc_id, reg))
+        return sorted(seen)
+
+    def _process_registers(self, proc):
+        """All register names a process needs as C locals.
+
+        Includes registers that are explicitly declared (int rN;), any rN
+        referenced by the body, and any observed by the exists clause, so we
+        never leave a register undeclared regardless of how the test spells it.
+        """
+        regs = set(proc.get('registers', []))
+        for op in proc.get('operations', []):
+            regs.update(re.findall(r'\br\d+\b', op))
+        for proc_id, reg, _ in self.parser.conditions:
+            if proc_id == proc['id']:
+                regs.add(reg)
+        return sorted(regs, key=lambda r: int(r[1:]))
+
+    def _rewrite_operation(self, op: str) -> str:
+        """Retarget references to shared variables at this iteration's slot.
+
+        The litmus body is otherwise emitted verbatim (klitmus keeps the C
+        code untouched).  A shared variable v appears either dereferenced
+        (*v, the object itself) or bare (v, its address, as passed to
+        smp_store_release/smp_load_acquire); registers and everything else are
+        left exactly as written so dependencies are carried in registers.
+        """
+        if not self.parser.variables:
+            return op
+
+        prefix = 'shared.'
+        arrays = self.parser.array_sizes
+
+        # Array variables first: v[expr] -> <prefix>v[i][(expr) & mask].  The
+        # mask keeps a data-dependent index in bounds for the verifier while
+        # preserving the dependency (the address still depends on expr).
+        for v, size in arrays.items():
+            op = re.sub(rf'\b{re.escape(v)}\s*\[\s*(.*?)\s*\]',
+                        lambda m, v=v, size=size: f'{prefix}{v}[i][({m.group(1)}) & {size - 1}]',
+                        op)
+
+        # Scalar variables: "*v" -> <prefix>v[i]; a bare "v" -> its address.
+        # A single left-to-right pass so emitted text is never rescanned.
+        scalars = [v for v in self.parser.variables if v not in arrays]
+        if scalars:
+            var_alt = '|'.join(re.escape(v) for v in
+                               sorted(scalars, key=len, reverse=True))
+            pattern = re.compile(r'\*\s*(' + var_alt + r')\b|\b(' + var_alt + r')\b')
+
+            def repl(m):
+                if m.group(1) is not None:
+                    return f'{prefix}{m.group(1)}[i]'
+                return f'&{prefix}{m.group(2)}[i]'
+
+            op = pattern.sub(repl, op)
+
+        return op
 
     def generate_bpf_c(self) -> str:
-        """Generate BPF C code"""
+        """Generate the BPF program."""
         if len(self.parser.processes) > self.max_processes:
-            print(f"Warning: Only supporting up to {self.max_processes} processes, but test has {len(self.parser.processes)}")
+            print(f"blitmus: {self.parser.test_name}: only {self.max_processes} "
+                  f"processes supported, test has {len(self.parser.processes)}",
+                  file=sys.stderr)
 
-        # Create register mapping first
-        self.reg_mapping = self._create_register_mapping()
+        # Registers observed by the exists clause (klitmus "finals").
+        observed = self._observed_regs()
 
-        code = []
-        code.append(f"/* Auto-generated from {self.parser.test_name}.litmus */")
+        code = [f"/* Auto-generated from {self.parser.test_name}.litmus */"]
         with open(self.bpf_header_file, 'r') as f:
-                header_content = f.read()
-        code.append(header_content)
+            code.append(f.read())
 
-        # Add comments from the original litmus test
+        # Carry the original litmus comment through for provenance.
         if self.parser.comments:
             code.append("/*")
             for comment in self.parser.comments:
                 for line in comment.split('\n'):
                     code.append(f" * {line.strip()}")
             code.append(" */")
-            code.append("")
+        code.append("")
 
-        # Add shared variables
+        # Shared variables (the locations under test) and the write-back slots
+        # for observed registers.  Unobserved registers never touch memory -
+        # they stay in BPF registers, so data/address/control dependencies are
+        # carried exactly as written.
+        def var_dim(var):
+            """Trailing array dimension: [SLOTS] for a scalar, [SLOTS][N] for
+            an array variable used as v[expr]."""
+            size = self.parser.array_sizes.get(var)
+            return f"[BLITMUS_SLOTS][{size}]" if size else "[BLITMUS_SLOTS]"
+
         code.append("struct {")
         for var in sorted(self.parser.variables):
-            code.append(f"    volatile __u64 {var}[10000];")
-
-        # Add registers for each process - use sequential numbering
-        for (proc_id, reg), reg_num in sorted(self.reg_mapping.items(), key=lambda item: item[1]):
-                code.append(f"    volatile __u64 r{reg_num}[10000];  // For P{proc_id}_{reg}")
-
+            code.append(f"\tvolatile __u64 {var}{var_dim(var)};")
+        for proc_id, reg in observed:
+            code.append(f"\tvolatile __u64 out_p{proc_id}_{reg}[BLITMUS_SLOTS];\t/* observed P{proc_id}:{reg} */")
         code.append("} shared;")
         code.append("")
         code.append(f"int num_threads = {len(self.parser.processes)};")
@@ -216,6 +335,9 @@ class BPFGenerator:
         # Generate BPF programs for each process
         for proc in self.parser.processes[:self.max_processes]:
             proc_id = proc['id']
+            regs = self._process_registers(proc)
+            spilled = [reg for (pid, reg) in observed if pid == proc_id]
+
             code.append(f"// Program for P{proc_id}")
             code.append(f"SEC(\"raw_tp/test_prog{proc_id + 1}\")")
             code.append(f"int handle_tp{proc_id + 1}(void *ctx)")
@@ -225,13 +347,30 @@ class BPFGenerator:
             code.append("")
             code.append("\tbpf_sense_barrier(&local_sense, num_threads);")
             code.append("\tsmp_mb();")
-            code.append("\tbpf_for (i, 0, 10000) {")
+            code.append("\tbpf_for (i, 0, BLITMUS_SLOTS) {")
             code.append(f"\t\tbarrier_wait({proc_id}, i);")
 
-            # Convert operations
+            # Litmus registers as C locals.  Initialised to 0 to satisfy the
+            # verifier; 0 is also LKMM's initial register value, so a register
+            # left unassigned on some path reads as the model expects.
+            for reg in regs:
+                code.append(f"\t\t__u64 {reg} = 0;")
+
+            # Compiler barrier delimiting the litmus body (cf. klitmus
+            # dump_start/dump_end): stops the compiler from moving harness code
+            # into the tested sequence.  It adds no hardware ordering.
+            code.append("\t\tasm volatile(\"\" ::: \"memory\");")
+
+            # Litmus body, verbatim except shared-variable references retargeted
+            # at this iteration's memory slot.
             for op in proc['operations']:
-                bpf_op = self._convert_operation(op, proc_id)
-                code.append(f"\t\t{bpf_op}")
+                code.append(f"\t\t{self._rewrite_operation(op)}")
+
+            code.append("\t\tasm volatile(\"\" ::: \"memory\");")
+
+            # Spill observed registers to shared memory, once per iteration.
+            for reg in spilled:
+                code.append(f"\t\tshared.out_p{proc_id}_{reg}[i] = {reg};")
 
             code.append("\t}")
             code.append("\tsmp_mb();")
@@ -241,269 +380,133 @@ class BPFGenerator:
 
         return "\n".join(code)
 
-    def _convert_operation(self, op: str, proc_id: int) -> str:
-        """Convert a litmus test operation to BPF code"""
+    def generate_print_histogram(self, ordered_names):
+        """Emit print_histogram(): a herd-style dump of every observed state.
 
-        # Handle memory-to-memory copy: *var1 = *var2;
-        memcpy_match = re.search(r'^\*(\w+)\s*=\s*\*(\w+);?$', op)
-        if memcpy_match:
-            dst, src = memcpy_match.groups()
-            return f"shared.{dst}[i] = shared.{src}[i];"
-
-        # Handle memory constant store: *var = constant;
-        mem_const_store_match = re.search(r'^\*(\w+)\s*=\s*(\d+);?$', op)
-        if mem_const_store_match:
-            var, val = mem_const_store_match.groups()
-            return f"shared.{var}[i] = {val};"
-
-        # Handle plain store: *var = reg;
-        plain_store_match = re.search(r'^\*(\w+)\s*=\s*(\w+);?$', op)
-        if plain_store_match:
-            var, reg = plain_store_match.groups()
-            reg_num = self.reg_mapping.get((proc_id, reg), 0)
-            return f"shared.{var}[i] = shared.r{reg_num}[i];"
-
-        # Handle plain load: reg = *var;
-        plain_load_match = re.search(r'^(\w+)\s*=\s*\*(\w+);?$', op)
-        if plain_load_match:
-            reg, var = plain_load_match.groups()
-            reg_num = self.reg_mapping.get((proc_id, reg), 0)
-            return f"shared.r{reg_num}[i] = shared.{var}[i];"
-
-        # Handle constant assignment: reg = constant;
-        const_assign_match = re.search(r'^(\w+)\s*=\s*(\d+);?$', op)
-        if const_assign_match:
-            reg, val = const_assign_match.groups()
-            reg_num = self.reg_mapping.get((proc_id, reg), 0)
-            return f"shared.r{reg_num}[i] = {val};"
-
-        # Handle WRITE_ONCE
-        write_match = re.search(r'WRITE_ONCE\(\*(\w+),\s*(\d+)\)', op)
-        if write_match:
-            var = write_match.group(1)
-            val = write_match.group(2)
-            return f"WRITE_ONCE(shared.{var}[i], {val});"
-
-        # Handle READ_ONCE
-        read_match = re.search(r'(\w+)\s*=\s*READ_ONCE\(\*(\w+)\)', op)
-        if read_match:
-            reg = read_match.group(1)
-            var = read_match.group(2)
-            # Use the sequential register mapping
-            reg_num = self.reg_mapping.get((proc_id, reg), 0)
-            return f"shared.r{reg_num}[i] = READ_ONCE(shared.{var}[i]);"
-
-        # Handle: if (*var == val) [memory condition]
-        if_mem_match = re.search(r'if\s*\(\s*\*(\w+)\s*==\s*(\d+)\s*\)\s*(\{)?', op)
-        if if_mem_match:
-            var, val, has_brace = if_mem_match.groups()
-            code = f"if (shared.{var}[i] == {val})"
-            if has_brace:
-                code += " {"
-            return code
-
-        # Handle: if (reg == val) [register condition]
-        if_reg_match = re.search(r'if\s*\(\s*(\w+)\s*==\s*(\d+)\s*\)\s*(\{)?', op)
-        if if_reg_match:
-            reg, val, has_brace = if_reg_match.groups()
-            reg_num = self.reg_mapping.get((proc_id, reg), 0)
-            code = f"if (shared.r{reg_num}[i] == {val})"
-            if has_brace:
-                code += " {"
-            return code
-
-        # Handle: if (reg != val) [register condition]
-        if_reg_match = re.search(r'if\s*\(\s*(\w+)\s*!=\s*(\d+)\s*\)\s*(\{)?', op)
-        if if_reg_match:
-            reg, val, has_brace = if_reg_match.groups()
-            reg_num = self.reg_mapping.get((proc_id, reg), 0)
-            code = f"if (shared.r{reg_num}[i] != {val})"
-            if has_brace:
-                code += " {"
-            return code
-
-        # Handle smp_mb
-        smp_mb_match = re.match(r'\s*smp_mb\(\s*\)\s*;?', op)
-        if smp_mb_match:
-            return "smp_mb();"
-
-        # Handle smp_store_release
-        store_release_match = re.search(r'smp_store_release\(\s*(\w+)\s*,\s*(\w+)\s*\)', op)
-        if store_release_match:
-            var, val = store_release_match.groups()
-            if val.isdigit():
-                return f"smp_store_release(&shared.{var}[i], {val});"
-            else:
-                reg_num = self.reg_mapping.get((proc_id, val), 0)
-                return f"smp_store_release(&shared.{var}[i], shared.r{reg_num}[i]);"
-
-        # Handle smp_load_acquire
-        load_acquire_match = re.search(r'(\w+)\s*=\s*smp_load_acquire\(\s*(\w+)\s*\)', op)
-        if load_acquire_match:
-            reg, var = load_acquire_match.groups()
-            reg_num = self.reg_mapping.get((proc_id, reg), 0)
-            return f"shared.r{reg_num}[i] = smp_load_acquire(&shared.{var}[i]);"
-
-        # Handle closing brace
-        if op.strip() == "}":
-            return "}"
-
-        # Default case - pass through (with a warning comment)
-        return f"{op}";
-
-    def generate_print_histogram(self, state_index, max_value_per_condition=10):
+        ordered_names is the list of condition names (e.g. p0_r0, var_x) in the
+        same order as the states[] array dimensions.
+        """
+        n = len(ordered_names)
         code = []
+        if n == 0:
+            code.append("static void print_histogram(void) {}")
+            code.append("")
+            return code
 
-        var_names = list(state_index.keys())
-        var_names_c = ', '.join(f'"{name}"' for name in var_names)
-        code.append(f'const char* var_names[] = {{{var_names_c}}};')
-        code.append('')
+        names_c = ', '.join(f'"{name}"' for name in ordered_names)
+        code.append(f"static const char *var_names[] = {{{names_c}}};")
+        code.append("")
+        code.append("static void print_histogram(void)")
+        code.append("{")
+        code.append("\tunsigned long long total_states = 0;")
 
-        code.append('void print_histogram() {')
-        code.append('    int total_states = 0;')
-        code.append('')
+        def loops(body_lines):
+            out = []
+            for k in range(n):
+                out.append('\t' * (k + 1) + f"for (int i{k} = 0; i{k} < HIST_DIM; i{k}++) {{")
+            ind = '\t' * (n + 1)
+            out.extend(ind + line for line in body_lines)
+            for k in reversed(range(n)):
+                out.append('\t' * (k + 1) + "}")
+            return out
 
-        total_conditions = len(var_names)
-        for i in range(total_conditions):
-            indent = '    ' * (i+1)
-            code.append(f'{indent}for (int i{i} = 0; i{i} < {max_value_per_condition}; i{i}++) {{')
+        idx = ''.join(f"[i{k}]" for k in range(n))
+        code.extend(loops([f"if (states{idx} > 0) total_states++;"]))
+        code.append('\tprintf("Histogram (%llu states)\\n", total_states);')
 
-        indent = '    ' * (total_conditions + 1)
-        index_string = ''.join(f'[i{i}]' for i in range(total_conditions))
-        code.append(f'{indent}if (states{index_string} > 0) total_states++;')
-
-        for i in reversed(range(total_conditions)):
-            indent = '    ' * (i+1)
-            code.append(f'{indent}}}')
-
-        code.append('')
-
-        code.append('    printf("Histogram (%d states)\\n", total_states);')
-        code.append('')
-
-        for i in range(total_conditions):
-            indent = '    ' * (i+1)
-            code.append(f'{indent}for (int i{i} = 0; i{i} < {max_value_per_condition}; i{i}++) {{')
-
-        indent = '    ' * (total_conditions + 1)
-        code.append(f'{indent}int count = states{index_string};')
-        code.append(f'{indent}if (count > 0) {{')
-        code.append(f'{indent}    printf("%-8d ", count);')
-        code.append(f'{indent}    if (&states{index_string} == expected_state_p) printf("*");')
-        code.append(f'{indent}    else printf(":");')
-        code.append(f'{indent}    printf(">");')
-        code.append(f'{indent}    int idx_vals[] = {{{", ".join(f"i{i}" for i in range(total_conditions))}}};')
-
-        code.append(f'{indent}    for (int k = 0; k < {total_conditions}; k++) {{')
-        code.append(f'{indent}        const char* name = var_names[k];')
-        code.append(f'{indent}        if (name[0] == \'p\') {{')
-        code.append(f'{indent}            int proc_id, reg_id;')
-        code.append(f'{indent}            sscanf(name, "p%d_r%d", &proc_id, &reg_id);')
-        code.append(f'{indent}            printf("%d:r%d=%d; ", proc_id, reg_id, idx_vals[k]);')
-        code.append(f'{indent}        }} else if (strncmp(name, "var_", 4) == 0) {{')
-        code.append(f'{indent}            printf("%s=%d; ", name+4, idx_vals[k]);')
-        code.append(f'{indent}        }} else {{')
-        code.append(f'{indent}            printf("%s=%d; ", name, idx_vals[k]);')
-        code.append(f'{indent}        }}')
-        code.append(f'{indent}    }}')
-        code.append(f'{indent}    printf("\\n");')
-        code.append(f'{indent}}}')
-
-        for i in reversed(range(total_conditions)):
-            indent = '    ' * (i+1)
-            code.append(f'{indent}}}')
-
-        code.append('}')
-        code.append('')
+        body = [
+            f"unsigned long long count = states{idx};",
+            "if (!count) continue;",
+            'printf("%-8llu %c>", count,',
+            f"       &states{idx} == expected_state_p ? '*' : ':');",
+            f"int vals[] = {{{', '.join(f'i{k}' for k in range(n))}}};",
+            f"for (int k = 0; k < {n}; k++) {{",
+            "\tconst char *name = var_names[k];",
+            "\tint proc, reg;",
+            '\tif (sscanf(name, "p%d_r%d", &proc, &reg) == 2)',
+            '\t\tprintf("%d:r%d=%d; ", proc, reg, vals[k]);',
+            '\telse if (!strncmp(name, "var_", 4))',
+            '\t\tprintf("%s=%d; ", name + 4, vals[k]);',
+            "}",
+            'printf("\\n");',
+        ]
+        code.extend(loops(body))
+        code.append("}")
+        code.append("")
         return code
 
-    def generate_user_c(self) -> str:
-        """Generate user-space C code"""
-        num_processes = len(self.parser.processes)
+    def generate_user_c(self, name: str = None, print_name: str = None) -> str:
+        """Generate the userspace loader/checker C code.
 
-        code = []
-        code.append(f"/* Auto-generated from {self.parser.test_name}.litmus */")
-        with open(self.user_header_file, 'r') as f:
-                header_content = f.read()
-        with open(self.user_footer_file, 'r') as f:
-                footer_content = f.read()
-        code.append(header_content)
+        name/print_name override the output/skeleton name and the printed
+        test name.
+        """
+        p = self.parser
+        with open(self.user_header_file) as f:
+            header = f.read()
+        with open(self.user_footer_file) as f:
+            footer = f.read()
 
-        # Determine the skeleton header name
-        test_name = self.parser.test_name.lower().replace('+', '_')
-        code.append(f"#include \"{test_name}.skel.h\"")
-        code.append(f"#define THREADS {len(self.parser.processes)}")
-        code.append(f"#define TEST_NAME {test_name}")
-        code.append(f"#define TEST_NAME_PRINT \"{self.parser.test_name}\"")
-        clause = self.parser.exists_clause.replace('\\', '\\\\')
-        code.append(f"#define EXISTS_CLAUSE \"{clause}\"")
+        test_name = name or p.test_name.lower().replace('+', '_')
+        print_name = print_name or p.test_name
+        # Ordered list of (name, expected_value) for every exists condition.
+        checks = [(f"p{pid}_{reg}", val) for pid, reg, val in p.conditions]
+        checks += [(f"var_{var}", val) for var, val in p.variable_conditions]
+        result_kind = {'Never': 'RESULT_NEVER',
+                       'Always': 'RESULT_ALWAYS'}.get(p.result_type, 'RESULT_SOMETIMES')
 
+        code = [f"/* Auto-generated from {p.test_name}.litmus */", header]
+        clause = p.exists_clause.replace('\\', '\\\\')
+        code += [
+            f'#include "{test_name}.skel.h"',
+            f"#define THREADS {len(p.processes)}",
+            f"#define TEST_NAME {test_name}",
+            f'#define TEST_NAME_PRINT "{print_name}"',
+            f'#define EXISTS_CLAUSE "{clause}"',
+            f"#define BLITMUS_SLOTS {NR_SLOTS}",
+            f"#define DEFAULT_ITERATIONS {DEFAULT_ITERATIONS}",
+            f"#define HIST_DIM {HIST_DIM}",
+            "/* Clamp a value to a valid histogram index (outcomes are small). */",
+            "#define HIST_IDX(v) ((v) < HIST_DIM ? (int)(v) : HIST_DIM - 1)",
+            "",
+            "enum { RESULT_NEVER, RESULT_SOMETIMES, RESULT_ALWAYS };",
+            f"static const int result_kind = {result_kind};",
+            "",
+        ]
 
-        num_proc_conditions = len(self.parser.conditions)
-        num_var_conditions = len(getattr(self.parser, 'variable_conditions', []))
-        total_conditions = num_proc_conditions + num_var_conditions
+        dims = "[HIST_DIM]" * len(checks) if checks else "[1]"
+        code.append(f"static unsigned long long states{dims};")
+        code.append("static unsigned long long *expected_state_p;")
+        code.append("")
 
-        code.append("unsigned long long states" + ("[10]" * total_conditions) + " = {0};")
-        code.append("unsigned long long *expected_state_p = NULL;")
-
-        # Add expected variable based on Result field
-        if self.parser.result_type in ["Sometimes", "Always"]:
-            code.append("bool expected = true;")
+        # check_cond(): read this slot's observed values, tally the histogram,
+        # and classify against the exists clause.
+        code.append("static void check_cond(STRUCT_NAME(TEST_NAME) *skel,")
+        code.append("\t\t       unsigned long long *matches,")
+        code.append("\t\t       unsigned long long *non_matches, int c)")
+        code.append("{")
+        for pid, reg, _ in p.conditions:
+            code.append(f"\tunsigned long long p{pid}_{reg} = skel->bss->shared.out_p{pid}_{reg}[c];")
+        for var, _ in p.variable_conditions:
+            code.append(f"\tunsigned long long var_{var} = skel->bss->shared.{var}[c];")
+        if checks:
+            hist_idx = ''.join(f"[HIST_IDX({name})]" for name, _ in checks)
+            code.append(f"\tstates{hist_idx}++;")
+            cond = " && ".join(f"{name} == {val}" for name, val in checks)
+            code.append(f"\tif ({cond}) {{")
+            code.append("\t\t(*matches)++;")
+            code.append(f"\t\texpected_state_p = &states{hist_idx};")
+            code.append("\t} else {")
+            code.append("\t\t(*non_matches)++;")
+            code.append("\t}")
         else:
-            code.append("bool expected = false;")
-
-        code.append("static void check_cond (STRUCT_NAME(TEST_NAME) *skel,")
-        code.append("\t\t\tunsigned long long *matches, unsigned long long *non_matches, int c) {")
-
-        # Generate result checking code based on exists clause
-        if self.parser.conditions or getattr(self.parser, 'variable_conditions', []):
-            # Generate code to get register values
-            code.append("\t// Get the values for this iteration")
-            for proc_id, reg, expected_value in getattr(self.parser, 'conditions', []):
-                reg_counter = self.reg_mapping[(proc_id, reg)]
-                var_name = f"p{proc_id}_{reg}"
-                code.append(f"\tunsigned long long {var_name} = skel->bss->shared.r{reg_counter}[c];")
-
-            # Generate code to get variable values (for variable conditions)
-            var_vars = []
-            for var, expected_value in getattr(self.parser, 'variable_conditions', []):
-                var_name = f"var_{var}"
-                code.append(f"\tunsigned long long {var_name} = skel->bss->shared.{var}[c];")
-                var_vars.append(var_name)
-
-            # Generate condition check
-            code.append("\t// Check if this iteration matches the exists clause")
-            conditions = []
-
-            state_index = {}
-
-            # Add register conditions
-            for proc_id, reg, expected_value in getattr(self.parser, 'conditions', []):
-                conditions.append(f"p{proc_id}_{reg} == {expected_value}")
-                state_index[f"p{proc_id}_{reg}"] = expected_value
-
-
-            # Add variable conditions
-            for var, expected_value in getattr(self.parser, 'variable_conditions', []):
-                    conditions.append(f"var_{var} == {expected_value}")
-                    state_index[f"var_{var}"] = expected_value
-
-            ordered_variables = list(state_index.keys())
-            index_string = "][".join(ordered_variables)
-            code_line = f"\tstates[{index_string}]++;"
-            code.append(code_line)
-
-            if conditions:
-                code.append("\tif (" + " && ".join(conditions) + ") {")
-                code.append("\t\t\t*matches += 1;")
-                code.append(f"\t\t\texpected_state_p = &states[{index_string}];")
-                code.append("\t} else {")
-                code.append("\t\t\t*non_matches += 1;")
-                code.append("\t}")
-
+            code.append("\t(void)skel; (void)c;")
+            code.append("\t(*non_matches)++;")
         code.append("}")
-        code.extend(self.generate_print_histogram(state_index))
-        code.append(footer_content)
+        code.append("")
+
+        code += self.generate_print_histogram([name for name, _ in checks])
+        code.append(footer)
         return "\n".join(code)
 
 def main():
@@ -526,89 +529,32 @@ def main():
     if args.verbose:
         print(litmus_parser.get_summary())
 
-    # Generate BPF code
+    # Skip tests using primitives the BPF backend cannot express (e.g.
+    # smp_wmb()/smp_rmb()) instead of emitting code that will not build/load.
+    # Exit 0 so `make regen_litmus` keeps processing the remaining tests.
+    if not litmus_parser.processes:
+        print(f"Skipping {args.litmus_file}: no processes parsed")
+        sys.exit(0)
+
+    unsupported = litmus_parser.unsupported_primitives()
+    if unsupported:
+        print(f"Skipping {litmus_parser.test_name}: unsupported primitive(s): "
+              f"{', '.join(sorted(unsupported))}")
+        sys.exit(0)
+
     generator = BPFGenerator(litmus_parser, bpf_header, user_header, user_footer)
-    bpf_code = generator.generate_bpf_c()
 
-    src_dir = os.path.join(os.getcwd(), 'src')
+    # Generated sources go under .output/gen/ (gitignored; regenerated by make).
+    gen_dir = os.path.join(os.getcwd(), '.output', 'gen')
+    os.makedirs(gen_dir, exist_ok=True)
 
-    # Determine output file name
-    test_name = args.name if args.name else litmus_parser.test_name.lower().replace('+', '_')
+    base_name = args.name if args.name else litmus_parser.test_name.lower().replace('+', '_')
 
-    # Write BPF code to file in src directory
-    bpf_file = os.path.join(src_dir, f"{test_name}.bpf.c")
-    with open(bpf_file, 'w') as f:
-        f.write(bpf_code)
-
-    print(f"Generated BPF code: {bpf_file}")
-
-    # Generate user-space code
-    user_code = generator.generate_user_c()
-    user_file = os.path.join(src_dir, f"{test_name}.c")
-    with open(user_file, 'w') as f:
-        f.write(user_code)
-
-    print(f"Generated user-space code: {user_file}")
-
-    # Update the main Makefile to add the test name to APPS
-    makefile_path = os.path.join(os.getcwd(), "Makefile")
-    if os.path.exists(makefile_path):
-        with open(makefile_path, 'r') as f:
-            makefile_content = f.read()
-
-        # Find the APPS line and update it
-        if 'APPS =' in makefile_content:
-            # Check if the test is already in APPS
-            apps_line_pattern = r'APPS\s*=\s*(.*?)(?:\n|$)'
-            apps_match = re.search(apps_line_pattern, makefile_content)
-            if apps_match:
-                apps_line = apps_match.group(0)
-                apps_value = apps_match.group(1).strip()
-
-                # Add the new test if it's not already there
-                if test_name not in apps_value.split():
-                    new_apps_line = f"APPS = {apps_value} {test_name}\n"
-                    makefile_content = makefile_content.replace(apps_line, new_apps_line)
-
-                    with open(makefile_path, 'w') as f:
-                        f.write(makefile_content)
-
-                    print(f"Updated Makefile: Added {test_name} to APPS")
-                else:
-                    print(f"Test {test_name} already in Makefile APPS")
-        else:
-            print("Warning: Could not find APPS line in Makefile")
-    else:
-        print("Warning: Makefile not found in the main directory")
-
-    # Update .gitignore to add the test name if it doesn't exist
-    gitignore_path = os.path.join(os.getcwd(), ".gitignore")
-    if os.path.exists(gitignore_path):
-        with open(gitignore_path, 'r') as f:
-            gitignore_content = f.read()
-
-        # Check if the test name is already in .gitignore
-        gitignore_lines = gitignore_content.strip().split('\n') if gitignore_content.strip() else []
-        if test_name not in gitignore_lines:
-            # Append the test name to .gitignore
-            with open(gitignore_path, 'a') as f:
-                if gitignore_content and not gitignore_content.endswith('\n'):
-                    f.write('\n')
-                f.write(f"{test_name}\n")
-            print(f"Updated .gitignore: Added {test_name}")
-        else:
-            print(f"Test {test_name} already in .gitignore")
-    else:
-        # Create .gitignore if it doesn't exist
-        with open(gitignore_path, 'w') as f:
-            f.write(f"{test_name}\n")
-        print(f"Created .gitignore and added {test_name}")
-
-    print(f"\nTo build the test:")
-    print(f"  cd {os.getcwd()}")
-    print(f"  make {test_name}")
-    print(f"\nTo run the test:")
-    print(f"  ./{test_name} [OPTIONS]")
+    with open(os.path.join(gen_dir, f"{base_name}.bpf.c"), 'w') as f:
+        f.write(generator.generate_bpf_c())
+    with open(os.path.join(gen_dir, f"{base_name}.c"), 'w') as f:
+        f.write(generator.generate_user_c(base_name, litmus_parser.test_name))
+    print(f"Generated test: {base_name}")
 
 if __name__ == "__main__":
     main()

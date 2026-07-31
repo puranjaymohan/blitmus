@@ -1,297 +1,249 @@
 /*****/
 
-static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+/* Quiet libbpf's debug chatter; surface warnings and errors. */
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
+			   va_list args)
 {
-        if (level == LIBBPF_DEBUG)
-                return 0;
-        return vfprintf(stderr, format, args);
+	if (level == LIBBPF_DEBUG)
+		return 0;
+	return vfprintf(stderr, format, args);
 }
-
-struct test_config {
-        int iterations;
-        int *cpus;
-        int verbose;
-};
 
 struct worker_args {
-        int cpu;
-        int prog_fd;
-        pthread_barrier_t *barrier;
+	int cpu;
+	int prog_fd;
+	pthread_barrier_t *barrier;
 };
 
-static int run_bpf_on_cpu(int prog_fd, int cpu)
+/* Run one process's BPF program pinned to @cpu via BPF_PROG_TEST_RUN. */
+static void *worker(void *arg)
 {
-        struct bpf_test_run_opts opts = {
-                .sz = sizeof(struct bpf_test_run_opts),
-                .flags = BPF_F_TEST_RUN_ON_CPU,
-                .cpu = cpu,
-        };
+	struct worker_args *a = arg;
+	cpu_set_t cpuset;
+	struct bpf_test_run_opts opts = {
+		.sz = sizeof(opts),
+		.flags = BPF_F_TEST_RUN_ON_CPU,
+		.cpu = a->cpu,
+	};
 
-        int err = bpf_prog_test_run_opts(prog_fd, &opts);
-        if (err) {
-                fprintf(stderr, "Failed to run BPF program on CPU %d: %s\n",
-                        cpu, strerror(errno));
-                return err;
-        }
+	CPU_ZERO(&cpuset);
+	CPU_SET(a->cpu, &cpuset);
+	if (sched_setaffinity(0, sizeof(cpuset), &cpuset))
+		perror("sched_setaffinity");
 
-        return 0;
+	/* Release all processes as close together as possible. */
+	pthread_barrier_wait(a->barrier);
+
+	if (bpf_prog_test_run_opts(a->prog_fd, &opts))
+		fprintf(stderr, "BPF_PROG_TEST_RUN on CPU %d: %s\n",
+			a->cpu, strerror(errno));
+	return NULL;
 }
 
-void *worker(void *arg)
+/* Zero the shared state (variables, result slots, and the sense barrier). */
+static void reset_state(STRUCT_NAME(TEST_NAME) *skel)
 {
-        struct worker_args *args = (struct worker_args *)arg;
-        int cpu = args->cpu;
-        int prog_fd = args->prog_fd;
-
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        CPU_SET(cpu, &cpuset);
-
-        if (sched_setaffinity(0, sizeof(cpuset), &cpuset)) {
-                perror("sched_setaffinity");
-                return NULL;
-        }
-
-        pthread_barrier_wait(args->barrier);
-
-        // Run the BPF program on the specified CPU
-        run_bpf_on_cpu(prog_fd, cpu);
-
-        return NULL;
+	memset(skel->bss, 0, sizeof(*skel->bss));
 }
 
-void reset_state(STRUCT_NAME(TEST_NAME) *skel) {
-        memset(skel->bss, 0, sizeof(*skel->bss));
+/*
+ * Choose THREADS distinct online CPUs at random (Fisher-Yates).  srand() is
+ * seeded once by the caller; picking fresh CPUs each run samples many
+ * hardware pairs over the course of a test.
+ */
+static int pick_random_cpus(int *cpus)
+{
+	cpu_set_t online;
+	int all[CPU_SETSIZE], n = 0, i;
+
+	CPU_ZERO(&online);
+	if (sched_getaffinity(0, sizeof(online), &online)) {
+		perror("sched_getaffinity");
+		return -1;
+	}
+	for (i = 0; i < CPU_SETSIZE; i++)
+		if (CPU_ISSET(i, &online))
+			all[n++] = i;
+
+	if (n < THREADS) {
+		fprintf(stderr, "need %d CPUs, only %d online\n", THREADS, n);
+		return -1;
+	}
+	for (i = n - 1; i > 0; i--) {
+		int j = rand() % (i + 1), tmp = all[i];
+
+		all[i] = all[j];
+		all[j] = tmp;
+	}
+	for (i = 0; i < THREADS; i++)
+		cpus[i] = all[i];
+	return 0;
 }
 
-void print_usage(const char *prog_name) {
-        printf("Usage: %s [OPTIONS]\n", prog_name);
-        printf("Options:\n");
-        printf("  -i, --iterations NUM   Number of test iterations (default: 1000000)\n");
-        printf("  -v, --verbose          Enable verbose output\n");
-        printf("  -h, --help             Display this help message\n");
-}
-
-void select_random_cpus(int *cpus) {
-        cpu_set_t available;
-        int total_cpus = 0;
-        int threads = THREADS;
-        int *available_cpus;
-        int i;
-
-        CPU_ZERO(&available);
-        if (sched_getaffinity(0, sizeof(available), &available) != 0) {
-                perror("sched_getaffinity");
-                exit(1);
-        }
-
-        /* Count available CPUs */
-        for (i = 0; i < CPU_SETSIZE; i++) {
-                if (CPU_ISSET(i, &available))
-                        total_cpus++;
-        }
-
-        if (threads > total_cpus) {
-                fprintf(stderr, "Not enough CPUs available (requested %d, available %d)\n", threads, total_cpus);
-                exit(1);
-        }
-
-        /* Build list of available CPUs */
-        available_cpus = malloc(sizeof(int) * total_cpus);
-        if (!available_cpus) {
-                perror("malloc");
-                exit(1);
-        }
-
-        int idx = 0;
-        for (i = 0; i < CPU_SETSIZE; i++) {
-                if (CPU_ISSET(i, &available))
-                        available_cpus[idx++] = i;
-        }
-
-        /* Shuffle using Fisher-Yates algorithm */
-        srand(time(NULL));
-        for (i = total_cpus - 1; i > 0; i--) {
-                int j = rand() % (i + 1);
-                int tmp = available_cpus[i];
-                available_cpus[i] = available_cpus[j];
-                available_cpus[j] = tmp;
-        }
-
-        /* Select first THREADS entries */
-        for (i = 0; i < threads; i++) {
-                cpus[i] = available_cpus[i];
-        }
-
-        free(available_cpus);
+static void print_usage(const char *prog)
+{
+	printf("Usage: %s [OPTIONS]\n", prog);
+	printf("Options:\n");
+	printf("  -i, --iterations NUM   Test rounds (default: %d); each round runs\n"
+	       "                         the litmus code %d times\n",
+	       DEFAULT_ITERATIONS, BLITMUS_SLOTS);
+	printf("  -v, --verbose          Print progress\n");
+	printf("  -h, --help             Show this help\n");
 }
 
 int main(int argc, char **argv)
 {
-        STRUCT_NAME(TEST_NAME) *skel;
-        struct bpf_program *prog;
-        int i = 0;
-        int err;
-        struct test_config config = {
-                .iterations = 4100,
-                .verbose = 0,
-        };
+	STRUCT_NAME(TEST_NAME) *skel;
+	struct bpf_program *prog;
+	int iterations = DEFAULT_ITERATIONS, verbose = 0;
+	unsigned long long matches = 0, non_matches = 0;
+	int prog_fds[THREADS], cpus[THREADS], nr_progs = 0;
+	struct worker_args args[THREADS];
+	pthread_t t[THREADS];
+	pthread_barrier_t barrier;
+	struct timespec start, end;
+	int opt, err = 0;
 
-        config.cpus = malloc(sizeof(int) * THREADS);
-	select_random_cpus(config.cpus);
+	static const struct option long_options[] = {
+		{ "iterations", required_argument, 0, 'i' },
+		{ "verbose",    no_argument,       0, 'v' },
+		{ "help",       no_argument,       0, 'h' },
+		{ 0, 0, 0, 0 }
+	};
 
-        unsigned long long  matches = 0, non_matches = 0;
+	while ((opt = getopt_long(argc, argv, "i:vh", long_options, NULL)) != -1) {
+		switch (opt) {
+		case 'i':
+			iterations = atoi(optarg);
+			break;
+		case 'v':
+			verbose = 1;
+			break;
+		case 'h':
+			print_usage(argv[0]);
+			return 0;
+		default:
+			print_usage(argv[0]);
+			return 1;
+		}
+	}
+	if (iterations <= 0) {
+		fprintf(stderr, "iterations must be > 0\n");
+		return 1;
+	}
 
-        pthread_t t[THREADS];
+	srand(time(NULL) ^ (getpid() << 16));
 
-        struct timespec start_time, end_time;
-        double elapsed_time;
+	libbpf_set_print(libbpf_print_fn);
 
-        int prog_fds[THREADS];
+	skel = BPF_OPEN(TEST_NAME)();
+	if (!skel) {
+		fprintf(stderr, "failed to open BPF skeleton\n");
+		return 1;
+	}
+	err = BPF_LOAD(TEST_NAME)(skel);
+	if (err) {
+		fprintf(stderr, "failed to load/verify BPF skeleton\n");
+		goto cleanup;
+	}
 
-        struct worker_args args[THREADS];
+	bpf_object__for_each_program(prog, *skel->skeleton->obj) {
+		if (nr_progs >= THREADS) {
+			fprintf(stderr, "more BPF programs than THREADS (%d)\n", THREADS);
+			err = -1;
+			goto cleanup;
+		}
+		prog_fds[nr_progs] = bpf_program__fd(prog);
+		if (prog_fds[nr_progs] < 0) {
+			fprintf(stderr, "failed to get program fd\n");
+			err = -1;
+			goto cleanup;
+		}
+		nr_progs++;
+	}
+	if (nr_progs != THREADS) {
+		fprintf(stderr, "expected %d BPF programs, found %d\n", THREADS, nr_progs);
+		err = -1;
+		goto cleanup;
+	}
 
-        pthread_barrier_t barrier;
+	printf("Starting litmus test with configuration:\n");
+	printf("  Test: %s\n", TEST_NAME_PRINT);
+	printf("  Iterations: %d\n", iterations);
 
-        static struct option long_options[] = {
-                {"iterations", required_argument, 0, 'i'},
-                {"verbose", no_argument, 0, 'v'},
-                {"help", no_argument, 0, 'h'},
-                {0, 0, 0, 0}
-        };
+	if (pthread_barrier_init(&barrier, NULL, THREADS)) {
+		fprintf(stderr, "failed to init barrier\n");
+		err = -1;
+		goto cleanup;
+	}
 
-        int opt;
-        int option_index = 0;
-        char optstring[50] = "i:vh:";
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	for (int it = 0; it < iterations; it++) {
+		reset_state(skel);
+		if (pick_random_cpus(cpus)) {
+			err = -1;
+			goto destroy_barrier;
+		}
+		for (int p = 0; p < THREADS; p++) {
+			args[p] = (struct worker_args){ cpus[p], prog_fds[p], &barrier };
+			pthread_create(&t[p], NULL, worker, &args[p]);
+		}
+		for (int p = 0; p < THREADS; p++)
+			pthread_join(t[p], NULL);
 
-        while ((opt = getopt_long(argc, argv, optstring, long_options, &option_index)) != -1) {
-                switch (opt) {
-                case 'i':
-                        config.iterations = atoi(optarg);
-                        break;
-                case 'v':
-                        config.verbose = 1;
-                        break;
-                case 'h':
-                        print_usage(argv[0]);
-                        return 0;
-                default:
-                        print_usage(argv[0]);
-                        return 1;
-                }
-        }
+		for (int c = 0; c < BLITMUS_SLOTS; c++)
+			check_cond(skel, &matches, &non_matches, c);
 
-        /* Set up libbpf errors and debug info callback */
-        libbpf_set_print(libbpf_print_fn);
+		if (verbose && it && it % (iterations / 10 ? iterations / 10 : 1) == 0) {
+			printf("\r  %d/%d rounds - positive: %llu       ",
+			       it, iterations, matches);
+			fflush(stdout);
+		}
+	}
+	clock_gettime(CLOCK_MONOTONIC, &end);
 
-        /* Open BPF application */
-        skel = BPF_OPEN(TEST_NAME)();
-        if (!skel) {
-                fprintf(stderr, "Failed to open BPF skeleton\n");
-                return 1;
-        }
+destroy_barrier:
+	pthread_barrier_destroy(&barrier);
+	if (err)
+		goto cleanup;
 
-        /* Load & verify BPF programs */
-        err = BPF_LOAD(TEST_NAME)(skel);
-        if (err) {
-                fprintf(stderr, "Failed to load and verify BPF skeleton\n");
-                goto cleanup;
-        }
+	double elapsed = (end.tv_sec - start.tv_sec) +
+			 (end.tv_nsec - start.tv_nsec) / 1e9;
 
-        /* Get program file descriptors */
-        bpf_object__for_each_program(prog, *skel->skeleton->obj) {
-                prog_fds[i++] = bpf_program__fd(prog);
-                if (prog_fds[i-1] < 0) {
-                        fprintf(stderr, "Failed to get program file descriptors\n");
-                        err = -1;
-                        goto cleanup;
-                }
-
-        }
-
-        printf("Starting litmus test with configuration:\n");
-        printf("  Test: %s\n", TEST_NAME_PRINT);
-        printf("  Iterations: %d\n", config.iterations);
-
-        clock_gettime(CLOCK_MONOTONIC, &start_time);
-
-        /* Initialize barrier for thread synchronization */
-        if (pthread_barrier_init(&barrier, NULL, THREADS) != 0) {
-                fprintf(stderr, "Failed to initialize barrier\n");
-                err = -1;
-                goto cleanup;
-        }
-
-        /* LOGIC */
-        for (i = 0; i < config.iterations; i++) {
-                reset_state(skel);
-
-		select_random_cpus(config.cpus);
-                for (int thread = 0; thread < THREADS; thread++) {
-                        args[thread].cpu = config.cpus[thread];
-                        args[thread].prog_fd = prog_fds[thread];
-                        args[thread].barrier = &barrier;
-
-                        pthread_create(&t[thread], NULL, worker, &args[thread]);
-                }
-
-                for (int thread = 0; thread < THREADS; thread++)
-                        pthread_join(t[thread], NULL);
-
-                // Check results
-                for (int c = 0; c < 10000; c++) {
-                        // Get the values for this iteration
-                        check_cond(skel, &matches, &non_matches, c);
-                }
-
-                if (config.verbose && i && i % (config.iterations / 10) == 0) {
-                        printf("\rProgress: %d/%d iterations (%.1f%%) - Matches: %llu (%.4f%%)",
-                                i, config.iterations, (float)i/config.iterations*100,
-                                matches, ((float)matches/(i*10000))*100);
-                        fflush(stdout);
-                }
-        }
-
-        /* Destroy the barrier */
-        pthread_barrier_destroy(&barrier);
-
-        clock_gettime(CLOCK_MONOTONIC, &end_time);
-        elapsed_time = (end_time.tv_sec - start_time.tv_sec) +
-                       (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-
-        // Get current time
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-        char time_str[25] = {0};
-        strftime(time_str, 25, "%a %b %d %H:%M:%S %Z %Y", tm_info);
-
-        // Print test header
-        printf("\nTest %s Allowed\n", TEST_NAME_PRINT);
-
+	printf("\nTest %s Allowed\n", TEST_NAME_PRINT);
 	print_histogram();
+	printf("%s\n\n", matches > 0 ? "Ok" : "No");
 
-        // Print validation result
-        printf("%s\n\n", matches > 0 ? "Ok" : "No");
+	printf("Witnesses\n");
+	printf("Positive: %llu, Negative: %llu\n", matches, non_matches);
+	printf("Condition exists (%s) is %svalidated\n", EXISTS_CLAUSE,
+	       matches > 0 ? "" : "NOT ");
 
-        // Print witness counts
-        printf("Witnesses\n");
-        printf("Positive: %llu, Negative: %llu\n", matches, non_matches);
-        printf("Condition exists (%s) is %s\n", EXISTS_CLAUSE,
-                matches > 0 ? "validated" : "NOT validated");
+	const char *observation = matches == 0 ? "Never" :
+				  non_matches == 0 ? "Always" : "Sometimes";
+	printf("Observation %s %s %llu %llu\n", TEST_NAME_PRINT, observation,
+	       matches, non_matches);
+	printf("Time %s %.2f\n\n", TEST_NAME_PRINT, elapsed);
 
-        // Print observation summary
-        const char* result_type = matches > 0 ? (matches == (config.iterations * 1000) ? "Always" : "Sometimes") : "Never";
-
-        printf("Observation %s %s %llu %llu\n", TEST_NAME_PRINT,
-                result_type, matches, non_matches);
-        printf("Time %s %.2f\n\n", TEST_NAME_PRINT,elapsed_time);
-
-        // Print timestamp
-        printf("%s\n", time_str);
-
-	err = !!matches && !expected;
+	/*
+	 * Return non-zero only when the hardware is WEAKER than LKMM permits:
+	 *   Never     - the forbidden outcome must never happen.
+	 *   Always    - the required outcome must happen every time.
+	 *   Sometimes - any observation is fine (stronger than LKMM is allowed).
+	 */
+	switch (result_kind) {
+	case RESULT_NEVER:
+		err = matches > 0;
+		break;
+	case RESULT_ALWAYS:
+		err = non_matches > 0;
+		break;
+	default:
+		err = 0;
+		break;
+	}
 
 cleanup:
-        BPF_DESTROY(TEST_NAME)(skel);
-        return err;
+	BPF_DESTROY(TEST_NAME)(skel);
+	return err;
 }
