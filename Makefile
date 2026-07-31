@@ -34,6 +34,9 @@ VMLINUX := src/vmlinux/$(ARCH)/vmlinux.h
 # build dir (for the generated *.skel.h).
 INCLUDES := -I$(OUTPUT) -Itemplate -Isrc/libbpf/include/uapi -I$(dir $(VMLINUX))
 CFLAGS := -g -Wall
+# Tuning knobs applied to BOTH the BPF and userspace compile so they agree,
+# e.g.: make BLITMUS_DEFS="-DARENA_PAGES=8192 -DBLITMUS_SLOTS=2048" bin/mp_recycle
+BLITMUS_DEFS ?=
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS) -lrt -ldl -lpthread -lm
 
 vpath %.bpf.c $(GEN)
@@ -113,7 +116,7 @@ $(BPFTOOL): | $(BPFTOOL_OUTPUT)
 $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) $(VMLINUX) | $(OUTPUT) $(BPFTOOL)
 	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -mcpu=v4 -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)	      \
-		     $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES)		      \
+		     $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) $(BLITMUS_DEFS)	      \
 		     -c $(filter %.bpf.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 
@@ -128,7 +131,7 @@ $(addprefix $(OUTPUT)/,$(addsuffix .o,$(APPS))): $(OUTPUT)/%.o: $(OUTPUT)/%.skel
 # Build userspace object
 $(OUTPUT)/%.o: %.c | $(OUTPUT)
 	$(call msg,CC,$@)
-	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) $(BLITMUS_DEFS) -c $(filter %.c,$^) -o $@
 
 # Link the test binary into bin/
 $(BIN)/%: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(BIN)

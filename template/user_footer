@@ -97,7 +97,7 @@ int main(int argc, char **argv)
 	struct bpf_program *prog;
 	int iterations = DEFAULT_ITERATIONS, verbose = 0;
 	unsigned long long matches = 0, non_matches = 0;
-	int prog_fds[THREADS], cpus[THREADS], nr_progs = 0;
+	int prog_fds[THREADS], cpus[THREADS], nr_progs = 0, reset_fd = -1;
 	struct worker_args args[THREADS];
 	pthread_t t[THREADS];
 	pthread_barrier_t barrier;
@@ -148,6 +148,11 @@ int main(int argc, char **argv)
 	}
 
 	bpf_object__for_each_program(prog, *skel->skeleton->obj) {
+		/* reset() is not a process: it runs once per round (below). */
+		if (!strcmp(bpf_program__name(prog), "handle_reset")) {
+			reset_fd = bpf_program__fd(prog);
+			continue;
+		}
 		if (nr_progs >= THREADS) {
 			fprintf(stderr, "more BPF programs than THREADS (%d)\n", THREADS);
 			err = -1;
@@ -180,6 +185,12 @@ int main(int argc, char **argv)
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	for (int it = 0; it < iterations; it++) {
 		reset_state(skel);
+		if (reset_fd >= 0) {
+			/* Free last round's pages (deferred) + clear arena state. */
+			struct bpf_test_run_opts ro = { .sz = sizeof(ro) };
+
+			bpf_prog_test_run_opts(reset_fd, &ro);
+		}
 		if (pick_random_cpus(cpus)) {
 			err = -1;
 			goto destroy_barrier;

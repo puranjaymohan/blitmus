@@ -1,0 +1,33 @@
+C MP+recycle
+
+(*
+ * Result: Never
+ *
+ * Message passing with x recycled: its page is allocated by the producer each
+ * slot and freed each round (arena-recycle), exercising the arena page
+ * lifecycle rather than a static mapping.
+ *
+ * The release/acquire on y orders the data before the flag, so a consumer that
+ * sees the flag (r0=1) must see the data (r1=1); 1:r0=1 /\ 1:r1=0 is forbidden.
+ *
+ * blitmus: arena-recycle x
+ *)
+
+{}
+
+P0(int *x, int *y)
+{
+	WRITE_ONCE(*x, 1);
+	smp_store_release(y, 1);
+}
+
+P1(int *x, int *y)
+{
+	int r0;
+	int r1;
+
+	r0 = smp_load_acquire(y);
+	r1 = READ_ONCE(*x);
+}
+
+exists (1:r0=1 /\ 1:r1=0)

@@ -14,8 +14,12 @@ import argparse
 # userspace round runs the litmus code NR_SLOTS times for a fast statistical
 # sample.  Keep in sync with BLITMUS_SLOTS in template/bpf_header.
 NR_SLOTS = 10000
+# arena-recycle uses few slots per round (keeps the two processes aligned) and
+# many more rounds; both are -D-overridable at build time.
+RECYCLE_SLOTS = 128
 # Default number of rounds (each runs the litmus code NR_SLOTS times).
 DEFAULT_ITERATIONS = 4100
+RECYCLE_ITERATIONS = 40000
 # Histogram dimension per observed value.  Litmus outcomes are small integers
 # (0/1/2); indices are clamped to this so an unexpected value can never index
 # the states[] array out of bounds.  Kept small so many-condition tests stay
@@ -38,6 +42,7 @@ class LitmusParser:
         self.conditions = []           # [(proc_id, reg, value)]
         self.variable_conditions = []  # [(var, value)]
         self.array_sizes = {}          # {var: size} for variables used as v[expr]
+        self.recycle_vars = []         # vars marked "blitmus: arena-recycle <var>"
 
     def parse(self) -> bool:
         """Parse the litmus test file"""
@@ -121,6 +126,12 @@ class LitmusParser:
                 while size <= max_lit:
                     size *= 2
                 self.array_sizes[v] = size
+
+            # "blitmus: arena-recycle <var>": <var> is recycled (see the backend).
+            for c in self.comments:
+                for m in re.finditer(r'blitmus:\s*arena-recycle\s+(\w+)', c):
+                    if m.group(1) in self.variables and m.group(1) not in self.recycle_vars:
+                        self.recycle_vars.append(m.group(1))
 
             # Extract exists clause
             exists_match = re.search(r'exists\s+\(([^)]*)\)', code_content)
@@ -309,12 +320,92 @@ struct {
 #define smp_store_release(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
 #define smp_load_acquire(p)     __atomic_load_n((p), __ATOMIC_ACQUIRE)"""
 
+    # arena-recycle backend: arena map (ARENA_PAGES, -D-overridable),
+    # address-space-aware release/acquire, and the page alloc/free kfuncs.
+    _RECYCLE_PREAMBLE = """\
+#ifndef ARENA_PAGES
+#define ARENA_PAGES 1024
+#endif
+struct {
+\t__uint(type, BPF_MAP_TYPE_ARENA);
+\t__uint(map_flags, BPF_F_MMAPABLE);
+\t__uint(max_entries, ARENA_PAGES);
+\t__ulong(map_extra, 0x1ull << 32);\t/* arm64 user vm start */
+} arena SEC(".maps");
+#define __arena __attribute__((address_space(1)))
+#define NUMA_NO_NODE (-1)
+#undef smp_store_release
+#undef smp_load_acquire
+#define smp_store_release(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+#define smp_load_acquire(p)     __atomic_load_n((p), __ATOMIC_ACQUIRE)
+
+void __arena *bpf_arena_alloc_pages(void *map, void __arena *addr, __u32 page_cnt,
+\t\t\t\t    int node_id, __u64 flags) __ksym;
+void bpf_arena_free_pages(void *map, void __arena *ptr, __u32 page_cnt) __ksym;"""
+
+    def _recycle_op_lines(self, op: str):
+        """Expand one litmus operation for the arena-recycle backend.
+
+        A recycled variable v is reached through a per-slot published pointer
+        v_ptr[i] rather than a static arena global.  A write allocates a fresh
+        page, writes through it, and publishes the pointer; a read loads the
+        pointer and dereferences it (guarded, so an unpublished slot reads 0).
+        Operations that touch no recycled variable are rewritten normally.
+        """
+        recycled = self.parser.recycle_vars
+        arrays = self.parser.array_sizes
+
+        touched = [v for v in recycled if re.search(rf'\b{re.escape(v)}\b', op)]
+        if not touched:
+            return [self._rewrite_operation(op, 'arena')]
+        if len(touched) > 1:
+            raise ValueError(f"operation touches >1 recycled var: {op!r}")
+
+        v = touched[0]
+        ptr, arr, size = f"{v}_p", f"{v}_ptr", arrays.get(v)
+        alloc = (f"{ptr} = bpf_arena_alloc_pages(&arena, (void __arena *)0, 1, "
+                 f"NUMA_NO_NODE, 0);")
+        v_re = re.escape(v)
+
+        # Scalar write: WRITE_ONCE(*v, VAL)
+        m = re.fullmatch(rf'WRITE_ONCE\(\s*\*\s*{v_re}\s*,\s*(.+?)\s*\)\s*;?', op)
+        if m and not size:
+            return [alloc, f"if (!{ptr}) continue;",
+                    f"WRITE_ONCE(*{ptr}, {m.group(1)});", f"{arr}[i] = {ptr};"]
+        # Array write: WRITE_ONCE(v[idx], VAL)
+        m = re.fullmatch(rf'WRITE_ONCE\(\s*{v_re}\s*\[\s*(.+?)\s*\]\s*,\s*(.+?)\s*\)\s*;?', op)
+        if m and size:
+            return [alloc, f"if (!{ptr}) continue;",
+                    f"WRITE_ONCE({ptr}[({m.group(1)}) & {size - 1}], {m.group(2)});",
+                    f"{arr}[i] = {ptr};"]
+        # Scalar read: rN = READ_ONCE(*v)
+        m = re.fullmatch(rf'(r\d+)\s*=\s*READ_ONCE\(\s*\*\s*{v_re}\s*\)\s*;?', op)
+        if m and not size:
+            return [f"{ptr} = {arr}[i];",
+                    f"{m.group(1)} = {ptr} ? READ_ONCE(*{ptr}) : 0;"]
+        # Array read: rN = READ_ONCE(v[idx])
+        m = re.fullmatch(rf'(r\d+)\s*=\s*READ_ONCE\(\s*{v_re}\s*\[\s*(.+?)\s*\]\s*\)\s*;?', op)
+        if m and size:
+            return [f"{ptr} = {arr}[i];",
+                    f"{m.group(1)} = {ptr} ? "
+                    f"READ_ONCE({ptr}[({m.group(2)}) & {size - 1}]) : 0;"]
+
+        raise ValueError(f"recycled var {v!r} used in unsupported form: {op!r}")
+
+    def _proc_recycle_vars(self, proc):
+        """Recycled variables referenced by a process's body."""
+        return [v for v in self.parser.recycle_vars
+                if any(re.search(rf'\b{re.escape(v)}\b', op)
+                       for op in proc.get('operations', []))]
+
     def generate_bpf_c(self, backend: str = 'bss') -> str:
         """Generate the BPF program.
 
-        backend='bss'   -> shared variables live in a bss struct (default).
-        backend='arena' -> shared variables are per-slot arena globals; only
-                           the observed registers stay in bss (for readout).
+        backend='bss'     -> shared variables live in a bss struct (default).
+        backend='arena'   -> shared variables are per-slot arena globals.
+        backend='recycle' -> recycled variables live on per-slot pages allocated
+                             and freed each round; other vars stay in the arena.
+        Observed registers always spill to bss for readout.
         """
         if len(self.parser.processes) > self.max_processes:
             print(f"blitmus: {self.parser.test_name}: only {self.max_processes} "
@@ -324,8 +415,15 @@ struct {
         # Registers observed by the exists clause (klitmus "finals").
         observed = self._observed_regs()
 
-        code = [f"/* Auto-generated from {self.parser.test_name}.litmus"
-                f"{' (arena backend)' if backend == 'arena' else ''} */"]
+        backend_tag = {'arena': ' (arena backend)',
+                       'recycle': ' (arena-recycle backend)'}.get(backend, '')
+        code = [f"/* Auto-generated from {self.parser.test_name}.litmus{backend_tag} */"]
+        # Default BLITMUS_SLOTS before bpf_header (its #ifndef picks it up); -D
+        # still overrides.
+        if backend == 'recycle':
+            code.append("#ifndef BLITMUS_SLOTS")
+            code.append(f"#define BLITMUS_SLOTS {RECYCLE_SLOTS}")
+            code.append("#endif")
         with open(self.bpf_header_file, 'r') as f:
             code.append(f.read())
 
@@ -348,7 +446,19 @@ struct {
             size = self.parser.array_sizes.get(var)
             return f"[BLITMUS_SLOTS][{size}]" if size else "[BLITMUS_SLOTS]"
 
-        if backend == 'arena':
+        if backend == 'recycle':
+            code.append(self._RECYCLE_PREAMBLE)
+            for var in sorted(self.parser.variables):
+                if var in self.parser.recycle_vars:
+                    code.append(f"__u64 __arena * __arena {var}_ptr[BLITMUS_SLOTS];"
+                                f"\t/* recycled {var}: per-slot published page */")
+                else:
+                    code.append(f"__u64 __arena {var}{var_dim(var)};")
+            code.append("struct {")
+            for proc_id, reg in observed:
+                code.append(f"\tvolatile __u64 out_p{proc_id}_{reg}[BLITMUS_SLOTS];\t/* observed P{proc_id}:{reg} */")
+            code.append("} shared;")
+        elif backend == 'arena':
             code.append(self._ARENA_PREAMBLE)
             for var in sorted(self.parser.variables):
                 code.append(f"__u64 __arena {var}{var_dim(var)};")
@@ -390,6 +500,11 @@ struct {
             for reg in regs:
                 code.append(f"\t\t__u64 {reg} = 0;")
 
+            # Per-slot pointer locals for recycled variables this process touches.
+            if backend == 'recycle':
+                for v in self._proc_recycle_vars(proc):
+                    code.append(f"\t\t__u64 __arena *{v}_p = 0;")
+
             # Compiler barrier delimiting the litmus body (cf. klitmus
             # dump_start/dump_end): stops the compiler from moving harness code
             # into the tested sequence.  It adds no hardware ordering.
@@ -398,7 +513,11 @@ struct {
             # Litmus body, verbatim except shared-variable references retargeted
             # at this iteration's memory slot.
             for op in proc['operations']:
-                code.append(f"\t\t{self._rewrite_operation(op, backend)}")
+                if backend == 'recycle':
+                    for line in self._recycle_op_lines(op):
+                        code.append(f"\t\t{line}")
+                else:
+                    code.append(f"\t\t{self._rewrite_operation(op, backend)}")
 
             code.append("\t\tasm volatile(\"\" ::: \"memory\");")
 
@@ -408,6 +527,33 @@ struct {
 
             code.append("\t}")
             code.append("\tsmp_mb();")
+            code.append("\treturn 0;")
+            code.append("}")
+            code.append("")
+
+        # reset(): run once per round by the harness before the processes.
+        # Frees each recycled page and clears the arena vars (userspace resets
+        # bss, not arena memory).
+        if backend == 'recycle':
+            code.append('SEC("raw_tp/reset")')
+            code.append("int handle_reset(void *ctx)")
+            code.append("{")
+            code.append("\tint i;")
+            code.append("\tbpf_for (i, 0, BLITMUS_SLOTS) {")
+            for var in sorted(self.parser.variables):
+                if var in self.parser.recycle_vars:
+                    code.append(f"\t\tif ({var}_ptr[i])")
+                    code.append(f"\t\t\tbpf_arena_free_pages(&arena, "
+                                f"(void __arena *){var}_ptr[i], 1);")
+                    code.append(f"\t\t{var}_ptr[i] = (void __arena *)0;")
+                else:
+                    size = self.parser.array_sizes.get(var)
+                    if size:
+                        code.append(f"\t\tfor (int k = 0; k < {size}; k++) "
+                                    f"{var}[i][k] = 0;")
+                    else:
+                        code.append(f"\t\t{var}[i] = 0;")
+            code.append("\t}")
             code.append("\treturn 0;")
             code.append("}")
             code.append("")
@@ -499,8 +645,11 @@ struct {
             f"#define TEST_NAME {test_name}",
             f'#define TEST_NAME_PRINT "{print_name}"',
             f'#define EXISTS_CLAUSE "{clause}"',
-            f"#define BLITMUS_SLOTS {NR_SLOTS}",
-            f"#define DEFAULT_ITERATIONS {DEFAULT_ITERATIONS}",
+            "#ifndef BLITMUS_SLOTS",
+            f"#define BLITMUS_SLOTS {RECYCLE_SLOTS if p.recycle_vars else NR_SLOTS}",
+            "#endif",
+            f"#define DEFAULT_ITERATIONS "
+            f"{RECYCLE_ITERATIONS if p.recycle_vars else DEFAULT_ITERATIONS}",
             f"#define HIST_DIM {HIST_DIM}",
             "/* Clamp a value to a valid histogram index (outcomes are small). */",
             "#define HIST_IDX(v) ((v) < HIST_DIM ? (int)(v) : HIST_DIM - 1)",
@@ -586,17 +735,24 @@ def main():
 
     base_name = args.name if args.name else litmus_parser.test_name.lower().replace('+', '_')
 
-    # Backends to emit.  "blitmus: arena" adds an arena variant that runs the
-    # same litmus with its shared variables in arena memory.  The arena backend
-    # needs register conditions (the observed values are read back from bss).
-    variants = [('bss', base_name, litmus_parser.test_name)]
-    if any(re.search(r'blitmus:\s*arena\b', c) for c in litmus_parser.comments):
+    # Which backend variants to emit.  "arena-recycle" is exclusive (arena-only,
+    # page-lifecycle probe); "arena" adds an arena variant alongside bss.  Both
+    # read observed values back from bss, so they need register conditions.
+    if litmus_parser.recycle_vars:
         if litmus_parser.variable_conditions:
-            print(f"blitmus: {litmus_parser.test_name}: arena backend needs "
-                  f"register conditions; skipping arena variant", file=sys.stderr)
-        else:
-            variants.append(('arena', f"{base_name}_arena",
-                             f"{litmus_parser.test_name} (arena)"))
+            print(f"blitmus: {litmus_parser.test_name}: arena-recycle needs "
+                  f"register conditions; skipping", file=sys.stderr)
+            sys.exit(0)
+        variants = [('recycle', base_name, litmus_parser.test_name)]
+    else:
+        variants = [('bss', base_name, litmus_parser.test_name)]
+        if any(re.search(r'blitmus:\s*arena\b', c) for c in litmus_parser.comments):
+            if litmus_parser.variable_conditions:
+                print(f"blitmus: {litmus_parser.test_name}: arena backend needs "
+                      f"register conditions; skipping arena variant", file=sys.stderr)
+            else:
+                variants.append(('arena', f"{base_name}_arena",
+                                 f"{litmus_parser.test_name} (arena)"))
 
     for backend, name, print_name in variants:
         with open(os.path.join(gen_dir, f"{name}.bpf.c"), 'w') as f:
