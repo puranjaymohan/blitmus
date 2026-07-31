@@ -1,0 +1,47 @@
+C SB+cmpxchgfail
+
+(*
+ * Result: Sometimes
+ *
+ * Probe for over-ordering of a FAILED cmpxchg.  z starts at 0, so
+ * cmpxchg(z, 1, 2) always fails and never writes.  In LKMM an
+ * unsuccessful RMW is relaxed and provides NO ordering, so it must not
+ * order WRITE_ONCE(*x) before READ_ONCE(*y): the SB outcome is allowed
+ * (Sometimes).
+ *
+ * This is a CHARACTERIZATION test, not a pass/fail bug test: LKMM allows
+ * the outcome, so any observed rate (including 0%) is acceptable - being
+ * STRONGER than LKMM is fine, only being weaker would be a bug.
+ *
+ * Observed divergence between the two arm64 atomic JIT paths, both >= LKMM:
+ *   - LSE (CASAL, bpf_jit_comp.c emit_lse_atomic): acquire+release even on
+ *     a failed compare -> fully ordered -> reads Never (STRONGER, ok).
+ *   - LL/SC (emit_ll_sc_atomic): on mismatch the CBNZ skips STLXR and the
+ *     trailing DMB ISH, leaving a plain LDXR -> relaxed -> reads Sometimes
+ *     (EQUAL to LKMM, ok).
+ * Measured on LSE hardware: Never (0/20M), while plain SB and SB+add
+ * reorder on the same CPUs, so the window is open - the ordering comes from
+ * CASAL, not from a closed window.
+ *)
+
+{}
+
+P0(int *x, int *y, int *z)
+{
+	int r0;
+
+	WRITE_ONCE(*x, 1);
+	cmpxchg(z, 1, 2);
+	r0 = READ_ONCE(*y);
+}
+
+P1(int *x, int *y, int *z)
+{
+	int r0;
+
+	WRITE_ONCE(*y, 1);
+	cmpxchg(z, 1, 2);
+	r0 = READ_ONCE(*x);
+}
+
+exists (0:r0=0 /\ 1:r0=0)

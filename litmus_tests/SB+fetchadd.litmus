@@ -1,0 +1,30 @@
+C SB+fetchadd
+
+(*
+ * Result: Never
+ *
+ * Store-buffering where each thread's store is a value-returning
+ * atomic_fetch_add() (0 -> 1).  A value-returning RMW is fully ordered
+ * in LKMM, so it forbids the SB outcome.  Exercises the
+ * BPF_ADD|BPF_FETCH JIT path (arm64: LDADDAL, or LL/SC LDXR+STLXR+DMB).
+ *)
+
+{}
+
+P0(int *x, int *y)
+{
+	int r0;
+
+	atomic_fetch_add(x, 1);
+	r0 = READ_ONCE(*y);
+}
+
+P1(int *x, int *y)
+{
+	int r0;
+
+	atomic_fetch_add(y, 1);
+	r0 = READ_ONCE(*x);
+}
+
+exists (0:r0=0 /\ 1:r0=0)

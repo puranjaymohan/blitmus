@@ -1,0 +1,39 @@
+C SB+fetchaddmb
+
+(*
+ * Result: Never
+ *
+ * Store-buffering with a value-returning atomic_fetch_add() on a third
+ * variable z used purely as a fence between the store and the load.  In
+ * LKMM a value-returning RMW is a full barrier (like smp_mb), so it must
+ * order the prior WRITE_ONCE(*x) before the later READ_ONCE(*y): the SB
+ * outcome is forbidden (Never).
+ *
+ * This is stronger than SB+fetchadd (where the RMW was itself the store):
+ * here the RMW is an unrelated op, so passing requires the RMW to fence a
+ * prior write against a later read - the true smp_mb property.  If this
+ * ever reads > 0%, the JIT's value-returning RMW is WEAKER than LKMM,
+ * which is a real bug.  arm64: LDADDAL (LSE) or LDXR+STLXR+DMB (LL/SC).
+ *)
+
+{}
+
+P0(int *x, int *y, int *z)
+{
+	int r0;
+
+	WRITE_ONCE(*x, 1);
+	atomic_fetch_add(z, 1);
+	r0 = READ_ONCE(*y);
+}
+
+P1(int *x, int *y, int *z)
+{
+	int r0;
+
+	WRITE_ONCE(*y, 1);
+	atomic_fetch_add(z, 1);
+	r0 = READ_ONCE(*x);
+}
+
+exists (0:r0=0 /\ 1:r0=0)

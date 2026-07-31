@@ -1,0 +1,31 @@
+C SB+cmpxchg
+
+(*
+ * Result: Never
+ *
+ * Store-buffering where each thread's store is a successful cmpxchg()
+ * (x and y start at 0, so the compare succeeds and writes 1).  A
+ * successful value-returning cmpxchg is fully ordered in LKMM, so it
+ * forbids the SB outcome.  Exercises the BPF_CMPXCHG JIT path
+ * (arm64: CASAL, or the LL/SC LDXR/STLXR compare loop).
+ *)
+
+{}
+
+P0(int *x, int *y)
+{
+	int r0;
+
+	cmpxchg(x, 0, 1);
+	r0 = READ_ONCE(*y);
+}
+
+P1(int *x, int *y)
+{
+	int r0;
+
+	cmpxchg(y, 0, 1);
+	r0 = READ_ONCE(*x);
+}
+
+exists (0:r0=0 /\ 1:r0=0)

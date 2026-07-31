@@ -1,0 +1,33 @@
+C SB+add
+
+(*
+ * Result: Sometimes
+ *
+ * Negative control for the SB+xchg / SB+cmpxchg / SB+fetchadd matrix.
+ * Here each thread's store is a NON-value-returning atomic_add() (0 -> 1),
+ * which is relaxed in LKMM and provides NO ordering, so the SB outcome is
+ * allowed.  Exercises the non-fetch BPF_ADD JIT path (arm64: STADD, or
+ * LL/SC LDXR+STXR).  If this reads 0.00% while the value-returning
+ * variants also read 0.00%, the harness is not opening the reordering
+ * window; if it forbids the outcome, the JIT is over-ordering STADD.
+ *)
+
+{}
+
+P0(int *x, int *y)
+{
+	int r0;
+
+	atomic_add(x, 1);
+	r0 = READ_ONCE(*y);
+}
+
+P1(int *x, int *y)
+{
+	int r0;
+
+	atomic_add(y, 1);
+	r0 = READ_ONCE(*x);
+}
+
+exists (0:r0=0 /\ 1:r0=0)
