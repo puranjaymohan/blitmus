@@ -7,6 +7,8 @@ C SB+xchg
  * A value-returning RMW is fully ordered in LKMM (like smp_mb), so it
  * orders the store ahead of the later load and forbids the SB outcome.
  * Exercises the BPF_XCHG JIT path (arm64: SWPAL, or LL/SC LDXR+STLXR+DMB).
+ *
+ * blitmus: arena
  *)
 
 {}

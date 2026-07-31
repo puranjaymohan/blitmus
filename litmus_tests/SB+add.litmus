@@ -10,6 +10,8 @@ C SB+add
  * LL/SC LDXR+STXR).  If this reads 0.00% while the value-returning
  * variants also read 0.00%, the harness is not opening the reordering
  * window; if it forbids the outcome, the JIT is over-ordering STADD.
+ *
+ * blitmus: arena
  *)
 
 {}

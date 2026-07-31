@@ -250,7 +250,7 @@ class BPFGenerator:
                 regs.add(reg)
         return sorted(regs, key=lambda r: int(r[1:]))
 
-    def _rewrite_operation(self, op: str) -> str:
+    def _rewrite_operation(self, op: str, backend: str = 'bss') -> str:
         """Retarget references to shared variables at this iteration's slot.
 
         The litmus body is otherwise emitted verbatim (klitmus keeps the C
@@ -258,11 +258,15 @@ class BPFGenerator:
         (*v, the object itself) or bare (v, its address, as passed to
         smp_store_release/smp_load_acquire); registers and everything else are
         left exactly as written so dependencies are carried in registers.
+
+        backend selects where the shared memory lives:
+          'bss'   -> shared.v[i]   (a per-slot array inside the bss struct)
+          'arena' -> v[i]          (a per-slot arena global)
         """
         if not self.parser.variables:
             return op
 
-        prefix = 'shared.'
+        prefix = 'shared.' if backend == 'bss' else ''
         arrays = self.parser.array_sizes
 
         # Array variables first: v[expr] -> <prefix>v[i][(expr) & mask].  The
@@ -290,8 +294,28 @@ class BPFGenerator:
 
         return op
 
-    def generate_bpf_c(self) -> str:
-        """Generate the BPF program."""
+    # Emitted before the shared-variable globals for the arena backend: the
+    # arena map plus address-space-aware release/acquire.
+    _ARENA_PREAMBLE = """\
+struct {
+\t__uint(type, BPF_MAP_TYPE_ARENA);
+\t__uint(map_flags, BPF_F_MMAPABLE);
+\t__uint(max_entries, 1024);
+\t__ulong(map_extra, 0x1ull << 32);\t/* arm64 user vm start */
+} arena SEC(".maps");
+#define __arena __attribute__((address_space(1)))
+#undef smp_store_release
+#undef smp_load_acquire
+#define smp_store_release(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+#define smp_load_acquire(p)     __atomic_load_n((p), __ATOMIC_ACQUIRE)"""
+
+    def generate_bpf_c(self, backend: str = 'bss') -> str:
+        """Generate the BPF program.
+
+        backend='bss'   -> shared variables live in a bss struct (default).
+        backend='arena' -> shared variables are per-slot arena globals; only
+                           the observed registers stay in bss (for readout).
+        """
         if len(self.parser.processes) > self.max_processes:
             print(f"blitmus: {self.parser.test_name}: only {self.max_processes} "
                   f"processes supported, test has {len(self.parser.processes)}",
@@ -300,7 +324,8 @@ class BPFGenerator:
         # Registers observed by the exists clause (klitmus "finals").
         observed = self._observed_regs()
 
-        code = [f"/* Auto-generated from {self.parser.test_name}.litmus */"]
+        code = [f"/* Auto-generated from {self.parser.test_name}.litmus"
+                f"{' (arena backend)' if backend == 'arena' else ''} */"]
         with open(self.bpf_header_file, 'r') as f:
             code.append(f.read())
 
@@ -323,12 +348,21 @@ class BPFGenerator:
             size = self.parser.array_sizes.get(var)
             return f"[BLITMUS_SLOTS][{size}]" if size else "[BLITMUS_SLOTS]"
 
-        code.append("struct {")
-        for var in sorted(self.parser.variables):
-            code.append(f"\tvolatile __u64 {var}{var_dim(var)};")
-        for proc_id, reg in observed:
-            code.append(f"\tvolatile __u64 out_p{proc_id}_{reg}[BLITMUS_SLOTS];\t/* observed P{proc_id}:{reg} */")
-        code.append("} shared;")
+        if backend == 'arena':
+            code.append(self._ARENA_PREAMBLE)
+            for var in sorted(self.parser.variables):
+                code.append(f"__u64 __arena {var}{var_dim(var)};")
+            code.append("struct {")
+            for proc_id, reg in observed:
+                code.append(f"\tvolatile __u64 out_p{proc_id}_{reg}[BLITMUS_SLOTS];\t/* observed P{proc_id}:{reg} */")
+            code.append("} shared;")
+        else:
+            code.append("struct {")
+            for var in sorted(self.parser.variables):
+                code.append(f"\tvolatile __u64 {var}{var_dim(var)};")
+            for proc_id, reg in observed:
+                code.append(f"\tvolatile __u64 out_p{proc_id}_{reg}[BLITMUS_SLOTS];\t/* observed P{proc_id}:{reg} */")
+            code.append("} shared;")
         code.append("")
         code.append(f"int num_threads = {len(self.parser.processes)};")
 
@@ -364,7 +398,7 @@ class BPFGenerator:
             # Litmus body, verbatim except shared-variable references retargeted
             # at this iteration's memory slot.
             for op in proc['operations']:
-                code.append(f"\t\t{self._rewrite_operation(op)}")
+                code.append(f"\t\t{self._rewrite_operation(op, backend)}")
 
             code.append("\t\tasm volatile(\"\" ::: \"memory\");")
 
@@ -438,8 +472,10 @@ class BPFGenerator:
     def generate_user_c(self, name: str = None, print_name: str = None) -> str:
         """Generate the userspace loader/checker C code.
 
-        name/print_name override the output/skeleton name and the printed
-        test name.
+        name/print_name override the output/skeleton name and the printed test
+        name, used to distinguish backend variants (e.g. sb_xchg vs
+        sb_xchg_arena).  The userspace side is identical across backends: the
+        observed registers always live in bss.
         """
         p = self.parser
         with open(self.user_header_file) as f:
@@ -550,11 +586,24 @@ def main():
 
     base_name = args.name if args.name else litmus_parser.test_name.lower().replace('+', '_')
 
-    with open(os.path.join(gen_dir, f"{base_name}.bpf.c"), 'w') as f:
-        f.write(generator.generate_bpf_c())
-    with open(os.path.join(gen_dir, f"{base_name}.c"), 'w') as f:
-        f.write(generator.generate_user_c(base_name, litmus_parser.test_name))
-    print(f"Generated test: {base_name}")
+    # Backends to emit.  "blitmus: arena" adds an arena variant that runs the
+    # same litmus with its shared variables in arena memory.  The arena backend
+    # needs register conditions (the observed values are read back from bss).
+    variants = [('bss', base_name, litmus_parser.test_name)]
+    if any(re.search(r'blitmus:\s*arena\b', c) for c in litmus_parser.comments):
+        if litmus_parser.variable_conditions:
+            print(f"blitmus: {litmus_parser.test_name}: arena backend needs "
+                  f"register conditions; skipping arena variant", file=sys.stderr)
+        else:
+            variants.append(('arena', f"{base_name}_arena",
+                             f"{litmus_parser.test_name} (arena)"))
+
+    for backend, name, print_name in variants:
+        with open(os.path.join(gen_dir, f"{name}.bpf.c"), 'w') as f:
+            f.write(generator.generate_bpf_c(backend))
+        with open(os.path.join(gen_dir, f"{name}.c"), 'w') as f:
+            f.write(generator.generate_user_c(name, print_name))
+        print(f"Generated {backend} test: {name}")
 
 if __name__ == "__main__":
     main()

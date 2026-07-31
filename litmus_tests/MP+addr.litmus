@@ -13,6 +13,8 @@ C MP+addr
  *
  * "data" is used as data[expr], so litmus2bpf lays it out as a per-slot array
  * and emits a bounds-masked, dependency-preserving indexed load.
+ *
+ * blitmus: arena
  *)
 
 {}
