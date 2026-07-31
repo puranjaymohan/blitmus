@@ -1,0 +1,37 @@
+C MP+addrfold
+
+(*
+ * Result: Sometimes
+ *
+ * Positive control for MP+addr, and a demonstration that a compiler can fold
+ * away an address dependency.  The dependent load is guarded by "if (r0 == 1)",
+ * so inside the branch the compiler knows r0 == 1 and folds data[r0] to the
+ * constant data[1].  The address dependency is then gone in the compiled code
+ * and only a control dependency remains, which does NOT order a later load, so
+ * the data read can be hoisted and return stale 0.
+ *
+ * LKMM/herd on the source alone says Never (it sees the syntactic address
+ * dependency), but the realistic verdict once clang folds it is Sometimes.
+ * Marked Sometimes so blitmus treats the expected reordering as a pass: this
+ * detects a broken dependency, it is not a JIT bug.
+ *)
+
+{}
+
+P0(int *data, int *idx)
+{
+	WRITE_ONCE(data[1], 1);
+	smp_store_release(idx, 1);
+}
+
+P1(int *data, int *idx)
+{
+	int r0;
+	int r1;
+
+	r0 = READ_ONCE(*idx);
+	if (r0 == 1)
+		r1 = READ_ONCE(data[r0]);
+}
+
+exists (1:r0=1 /\ 1:r1=0)

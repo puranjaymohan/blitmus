@@ -1,0 +1,35 @@
+C MP+addr
+
+(*
+ * Result: Never
+ *
+ * Message passing where the consumer orders its two reads with an ADDRESS
+ * DEPENDENCY instead of a barrier: it reads the published index, then reads
+ * data[index].  In LKMM an address dependency from a marked (READ_ONCE) load
+ * orders the dependent load after it (like rcu_dereference), and the
+ * producer's smp_store_release() orders the data write before the publish.  A
+ * consumer that sees the publish (r0=1) must therefore see the data (r1=1);
+ * the outcome 1:r0=1 /\ 1:r1=0 is forbidden.
+ *
+ * "data" is used as data[expr], so litmus2bpf lays it out as a per-slot array
+ * and emits a bounds-masked, dependency-preserving indexed load.
+ *)
+
+{}
+
+P0(int *data, int *idx)
+{
+	WRITE_ONCE(data[1], 1);
+	smp_store_release(idx, 1);
+}
+
+P1(int *data, int *idx)
+{
+	int r0;
+	int r1;
+
+	r0 = READ_ONCE(*idx);
+	r1 = READ_ONCE(data[r0]);
+}
+
+exists (1:r0=1 /\ 1:r1=0)
