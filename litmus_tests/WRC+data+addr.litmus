@@ -1,0 +1,50 @@
+C WRC+data+addr
+
+(*
+ * Result: Sometimes
+ *
+ * Write-to-read causality with dependencies instead of barriers: P1's store
+ * to y carries a data dependency from its read of x, and P2's read of x
+ * carries an address dependency from its read of y.  Both dependencies are
+ * respected by every architecture blitmus targets, so neither process can
+ * reorder its own accesses.  The outcome is therefore only reachable if P0's
+ * store reached P1 before it reached P2 - a failure of other-multi-copy
+ * atomicity.
+ *
+ * LKMM allows it: dependencies order accesses within a process but do not
+ * make a store propagate to all processes at once.
+ *
+ * Expected per architecture:
+ *   arm64   - not observed; arm64 is other-multi-copy atomic.
+ *   powerpc - observed; POWER is not.
+ *
+ * Uses no barriers and no atomics, so it exercises the plain load/store JIT
+ * paths and the dependency-preserving indexed load ("x" is used as x[expr],
+ * so litmus2bpf lays it out as a per-slot array).
+ *)
+
+{}
+
+P0(int *x)
+{
+	WRITE_ONCE(x[1], 1);
+}
+
+P1(int *x, int *y)
+{
+	int r0;
+
+	r0 = READ_ONCE(x[1]);
+	WRITE_ONCE(*y, r0);
+}
+
+P2(int *x, int *y)
+{
+	int r1;
+	int r2;
+
+	r1 = READ_ONCE(*y);
+	r2 = READ_ONCE(x[r1]);
+}
+
+exists (1:r0=1 /\ 2:r1=1 /\ 2:r2=0)

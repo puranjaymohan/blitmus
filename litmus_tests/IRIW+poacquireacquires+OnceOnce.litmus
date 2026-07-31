@@ -1,0 +1,58 @@
+C IRIW+poacquireacquires+OnceOnce
+
+(*
+ * Result: Sometimes
+ *
+ * Independent reads of independent writes, with an acquire load in BOTH
+ * readers.  The acquires stop each reader from reordering its own two loads,
+ * so the outcome can only be reached if the two readers disagree about the
+ * order in which the two independent stores became visible.  That makes this
+ * a test for other-multi-copy atomicity rather than for local reordering.
+ *
+ * LKMM allows it: only a full barrier (smp_mb, see IRIW+fencembonceonces)
+ * forces the readers to agree.
+ *
+ * Expected per architecture:
+ *   arm64  - not observed.  BPF_LOAD_ACQ becomes LDAR, and arm64 is
+ *            other-multi-copy atomic, so the stores reach both readers in
+ *            the same order.  Stronger than LKMM, which is fine.
+ *   powerpc - observed.  BPF_LOAD_ACQ becomes "load; lwsync", and lwsync is
+ *            A-cumulative but does not restore multi-copy atomicity, so the
+ *            two readers can disagree.
+ *
+ * Contrast with IRIW+poacquireacquire+releaserelease, where only P1 uses
+ * acquire loads: there the outcome is reachable by plain reordering inside
+ * P3 and says nothing about multi-copy atomicity.
+ *)
+
+{}
+
+P0(int *x)
+{
+	WRITE_ONCE(*x, 1);
+}
+
+P1(int *x, int *y)
+{
+	int r0;
+	int r1;
+
+	r0 = smp_load_acquire(x);
+	r1 = smp_load_acquire(y);
+}
+
+P2(int *y)
+{
+	WRITE_ONCE(*y, 1);
+}
+
+P3(int *x, int *y)
+{
+	int r0;
+	int r1;
+
+	r0 = smp_load_acquire(y);
+	r1 = smp_load_acquire(x);
+}
+
+exists (1:r0=1 /\ 1:r1=0 /\ 3:r0=1 /\ 3:r1=0)
