@@ -125,30 +125,67 @@ P1(int *x, int *y)
 exists (0:r0=0 /\ 1:r0=0)
 ```
 
+## Repository layout
+
+Only source is committed; everything generated is (re)built by `make`.
+
+| Path | Committed? | Contents |
+|------|:----------:|----------|
+| `litmus2bpf.py`  | yes | Litmus-test → BPF converter |
+| `litmus_tests/`  | yes | Litmus tests (`*.litmus`), the primary inputs |
+| `template/`      | yes | Reusable pieces: `bpf_header` (BPF-side macros/barriers), `user_header`/`user_footer` (generated-test harness) |
+| `src/`           | yes | Build deps only: `libbpf`/`bpftool` submodules and `vmlinux/` headers |
+| `.output/`       | no  | Generated sources (`.output/gen/`) + build artifacts (libbpf, bpftool, `*.bpf.o`, `*.skel.h`, `*.o`) |
+| `bin/`           | no  | Built test executables |
+
+`.output/` and `bin/` are git-ignored and reproduced from `litmus_tests/` by `make`.
+
 ## Usage
-
-### Converting Litmus Tests
-
-Convert a litmus test to BPF program:
-```bash
-./litmus2bpf.py litmus_tests/SB+poonceonces.litmus
-```
-
-This generates:
-- `src/sb_poonceonces.bpf.c` - BPF program implementing the test
-- `src/sb_poonceonces.c` - Userspace program to load and run the BPF program
 
 ### Building and Running
 
-Build all generated programs:
 ```bash
-make
+git submodule update --init --recursive
+make                 # regenerate sources into .output/gen and build every test into bin/
 ```
 
-Run a specific test:
+Run a specific test (needs BPF privileges):
 ```bash
-./sb_poonceonces [options]
+sudo ./bin/sb_poonceonces [options]
 ```
+
+Run the whole suite with a summary table:
+```bash
+sudo ./run.sh        # or: sudo make run
+```
+
+Useful make targets: `make regen` (regenerate `.output/gen` only), `make build`
+(build without regenerating), `make clean` (remove `.output/` and `bin/`).
+
+### Converting a single litmus test
+
+`make` runs this for every file in `litmus_tests/`, but you can invoke it directly:
+```bash
+./litmus2bpf.py litmus_tests/SB+poonceonces.litmus
+```
+This writes `.output/gen/sb_poonceonces.c` and `.output/gen/sb_poonceonces.bpf.c`.
+Tests using primitives BPF can't express are skipped.
+
+### Litmus annotations
+
+Directives in the `(* *)` comment control code generation:
+
+- `blitmus: arena` - also emit an arena-backend variant (`<name>_arena`) that
+  runs the same litmus with its shared variables in BPF arena memory instead of
+  bss.  Requires register (not variable) exists conditions.
+- `blitmus: arena-recycle <var>` - arena-only variant where `<var>`'s page is
+  allocated fresh each slot, published through a pointer, and freed (deferred)
+  by a per-round `reset()`, exercising the arena page lifecycle rather than a
+  static mapping (see `MP+recycle.litmus`).  Tune slots/pages with
+  `make BLITMUS_DEFS="-DBLITMUS_SLOTS=128 -DARENA_PAGES=1024" bin/<name>`.
+- A variable used as `v[expr]` is laid out as a per-slot array and accessed with
+  a bounds-masked, dependency-preserving indexed load - this is how address
+  dependencies (e.g. `MP+addr`) are expressed.
 
 ### Command Line Options
 
@@ -165,7 +202,7 @@ If the comment in the Litmus Test says "Result: Never" and the condition in the 
 Running on Aarch64
 
 ```bash
-$ sudo ./sb_poonceonces -i 2100
+$ sudo ./bin/sb_poonceonces -i 2100
 Starting litmus test with configuration:
     Test: SB+poonceonces
     Iterations: 2100
@@ -190,7 +227,7 @@ Running on x86-64
 
 ```bash
 
-$ sudo ./sb_poonceonces -i 2100
+$ sudo ./bin/sb_poonceonces -i 2100
 Starting litmus test with configuration:
   Test: SB+poonceonces
   Iterations: 2100
@@ -247,8 +284,9 @@ make
 
 ## TODO
 - [ ] Improve the litmus2bpf.py to act as a full lexer -> parser
-- [ ] Add more litmus tests to check BPF specific patters
-- [ ] Add a script to auto-execute all tests and generate a report.
+- [ ] Add more litmus tests to check BPF specific patterns
+- [x] Add a script to auto-execute all tests and generate a report (`run.sh`)
+- [x] Teach litmus2bpf.py to emit arena tests (`blitmus: arena` / `arena-recycle`)
 - [ ] Improve the overall userspace and bpf code templates
 
 ## License
