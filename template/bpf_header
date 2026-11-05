@@ -86,8 +86,10 @@ volatile __u32 sense;
  *   atomic_add  -> non-value-returning RMW: relaxed (LKMM: no ordering).
  *       BPF_ADD (no FETCH).  arm64 LSE: STADD;  LL/SC: LDXR..STXR.
  *
- * The first argument is the address (a bare litmus variable becomes
- * &shared.v[i] in generated code).
+ * The arguments follow the kernel and herd7: xchg() and cmpxchg() take the
+ * address first, atomic_add() and atomic_fetch_add() take the value first
+ * and the address second.  A bare litmus variable becomes &shared.v[i] in
+ * generated code.
  */
 #define xchg(p, v)		__atomic_exchange_n((p), (v), __ATOMIC_SEQ_CST)
 
@@ -100,8 +102,8 @@ volatile __u32 sense;
 		__old;							\
 	})
 
-#define atomic_fetch_add(p, v)	__sync_fetch_and_add((p), (v))
-#define atomic_add(p, v)	((void)__atomic_fetch_add((p), (v), __ATOMIC_RELAXED))
+#define atomic_fetch_add(v, p)	__sync_fetch_and_add((p), (v))
+#define atomic_add(v, p)	((void)__atomic_fetch_add((p), (v), __ATOMIC_RELAXED))
 
 /*
  * Per-slot rendezvous: for slot i, the process whose id matches i's parity

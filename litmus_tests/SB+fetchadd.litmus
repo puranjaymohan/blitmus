@@ -15,7 +15,7 @@ P0(int *x, int *y)
 {
 	int r0;
 
-	atomic_fetch_add(x, 1);
+	atomic_fetch_add(1, x);
 	r0 = READ_ONCE(*y);
 }
 
@@ -23,7 +23,7 @@ P1(int *x, int *y)
 {
 	int r0;
 
-	atomic_fetch_add(y, 1);
+	atomic_fetch_add(1, y);
 	r0 = READ_ONCE(*x);
 }
 
