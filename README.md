@@ -196,7 +196,9 @@ Generated test programs support these options:
 - `-h, --help`: Display help message
 
 ### Return code
-If the comment in the Litmus Test says "Result: Never" and the condition in the exists clause is validated in any of the iterations then 1 is returned otherwise 0 is returned. So, a return code of 1 means invalid behaviour.
+If the comment in the Litmus Test says "Result: Never" and the condition in the exists clause is validated in any of the iterations, or it says "Result: Always" and the condition fails in any of them, then 1 is returned. So, a return code of 1 means invalid behaviour.
+
+Any other non-zero return code means the test did not run to completion: the BPF programs failed to load, or a `BPF_PROG_TEST_RUN` failed, which is also reported on stderr. A process that did not run would leave its results zeroed, so the test stops instead of counting them.
 
 ### Example
 

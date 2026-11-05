@@ -13,6 +13,7 @@ struct worker_args {
 	int cpu;
 	int prog_fd;
 	pthread_barrier_t *barrier;
+	int err;
 };
 
 /* Run one process's BPF program pinned to @cpu via BPF_PROG_TEST_RUN. */
@@ -34,7 +35,12 @@ static void *worker(void *arg)
 	/* Release all processes as close together as possible. */
 	pthread_barrier_wait(a->barrier);
 
-	if (bpf_prog_test_run_opts(a->prog_fd, &opts))
+	/*
+	 * A process that did not run leaves its result slots zeroed, which
+	 * would count as negatives: report it so the round is not counted.
+	 */
+	a->err = bpf_prog_test_run_opts(a->prog_fd, &opts);
+	if (a->err)
 		fprintf(stderr, "BPF_PROG_TEST_RUN on CPU %d: %s\n",
 			a->cpu, strerror(errno));
 	return NULL;
@@ -189,18 +195,31 @@ int main(int argc, char **argv)
 			/* Free last round's pages (deferred) + clear arena state. */
 			struct bpf_test_run_opts ro = { .sz = sizeof(ro) };
 
-			bpf_prog_test_run_opts(reset_fd, &ro);
+			if (bpf_prog_test_run_opts(reset_fd, &ro)) {
+				fprintf(stderr, "BPF_PROG_TEST_RUN of reset: %s\n",
+					strerror(errno));
+				err = -1;
+				goto destroy_barrier;
+			}
 		}
 		if (pick_random_cpus(cpus)) {
 			err = -1;
 			goto destroy_barrier;
 		}
 		for (int p = 0; p < THREADS; p++) {
-			args[p] = (struct worker_args){ cpus[p], prog_fds[p], &barrier };
-			pthread_create(&t[p], NULL, worker, &args[p]);
+			args[p] = (struct worker_args){ cpus[p], prog_fds[p], &barrier, 0 };
+			if (pthread_create(&t[p], NULL, worker, &args[p])) {
+				fprintf(stderr, "failed to create worker thread\n");
+				exit(1);
+			}
 		}
-		for (int p = 0; p < THREADS; p++)
+		for (int p = 0; p < THREADS; p++) {
 			pthread_join(t[p], NULL);
+			if (args[p].err)
+				err = -1;
+		}
+		if (err)
+			goto destroy_barrier;
 
 		for (int c = 0; c < BLITMUS_SLOTS; c++)
 			check_cond(skel, &matches, &non_matches, c);
