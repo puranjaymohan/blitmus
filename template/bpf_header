@@ -52,12 +52,14 @@ volatile __u32 sense;
  * smp_mb(): a full memory barrier.  BPF has no fence instruction, so we emit a
  * value-returning atomic RMW, which the JITs lower to a fully-ordered atomic
  * (arm64: LDADDAL, or LL/SC + DMB).  The target is a private stack slot; only
- * the emitted instruction's barrier matters, not the location or the result.
+ * the emitted instruction's barrier matters, not the location.  The result is
+ * stored anyway: clang before 20 lowers a __sync_fetch_and_add() whose result
+ * is unused to the relaxed BPF_ADD without BPF_FETCH (LLVM PR #101428).
  */
 #define smp_mb()						\
 	({							\
 		volatile __u64 __mb = 0;			\
-		(void)__sync_fetch_and_add(&__mb, 0);		\
+		__mb = __sync_fetch_and_add(&__mb, 0);		\
 	})
 
 #define smp_load_acquire(p)					\
