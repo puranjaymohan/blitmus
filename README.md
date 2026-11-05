@@ -169,7 +169,8 @@ Useful make targets: `make regen` (regenerate `.output/gen` only), `make build`
 ./litmus2bpf.py litmus_tests/SB+poonceonces.litmus
 ```
 This writes `.output/gen/sb_poonceonces.c` and `.output/gen/sb_poonceonces.bpf.c`.
-Tests using primitives BPF can't express are skipped.
+Tests using primitives BPF can't express are skipped with a message on stderr,
+and no binary is built for them.
 
 ### Litmus annotations
 

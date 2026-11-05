@@ -179,7 +179,8 @@ class LitmusParser:
                 self.variable_conditions.append((var, value))
                 continue
 
-            print(f"Warning: Could not parse exists clause part: {part}")
+            print(f"Warning: Could not parse exists clause part: {part}",
+                  file=sys.stderr)
 
     # Ordering primitives the BPF backend/template can actually lower.  BPF has
     # no instruction for a standalone read/write barrier, so smp_wmb()/smp_rmb()
@@ -716,15 +717,17 @@ def main():
 
     # Skip tests using primitives the BPF backend cannot express (e.g.
     # smp_wmb()/smp_rmb()) instead of emitting code that will not build/load.
-    # Exit 0 so `make regen_litmus` keeps processing the remaining tests.
+    # Exit 0 so `make regen` keeps processing the remaining tests, but say so
+    # on stderr: make discards stdout, and a skipped test builds no binary.
     if not litmus_parser.processes:
-        print(f"Skipping {args.litmus_file}: no processes parsed")
+        print(f"Skipping {args.litmus_file}: no processes parsed",
+              file=sys.stderr)
         sys.exit(0)
 
     unsupported = litmus_parser.unsupported_primitives()
     if unsupported:
         print(f"Skipping {litmus_parser.test_name}: unsupported primitive(s): "
-              f"{', '.join(sorted(unsupported))}")
+              f"{', '.join(sorted(unsupported))}", file=sys.stderr)
         sys.exit(0)
 
     generator = BPFGenerator(litmus_parser, bpf_header, user_header, user_footer)
